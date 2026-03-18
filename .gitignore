@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+*.db
+mamut.db
+logs/
+.env
+.venv
+venv/
