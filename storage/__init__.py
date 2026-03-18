@@ -7,6 +7,10 @@ from storage.models import (
     CreatorProfile,
     AuditLog,
     SystemState,
+    SignalHistory,
+    TokenLifecycle,
+    PerformanceMetrics,
+    SignalOutcome,
 )
 from storage.sqlite_store import SQLiteStore
 
@@ -18,5 +22,9 @@ __all__ = [
     "CreatorProfile",
     "AuditLog",
     "SystemState",
+    "SignalHistory",
+    "TokenLifecycle",
+    "PerformanceMetrics",
+    "SignalOutcome",
     "SQLiteStore",
 ]
