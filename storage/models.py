@@ -43,6 +43,9 @@ class Token(Base):
     raydium_liquidity_sol = Column(Float, default=0.0)
     raydium_pool_age_minutes = Column(Integer)
     
+    # Lifecycle status: discovered, analyzed, signaled, closed
+    lifecycle_status = Column(String(50), default="discovered", index=True)
+    
     # Timestamps
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -51,6 +54,8 @@ class Token(Base):
         Index('idx_mint_symbol', 'mint', 'symbol'),
         Index('idx_risk_level_created', 'risk_level', 'created_at'),
         Index('idx_creator_created', 'creator', 'created_at'),
+        Index('idx_token_status_created', 'lifecycle_status', 'created_at'),
+        Index('idx_mint_creator_risk', 'mint', 'creator', 'risk_level'),
     )
 
 
@@ -113,9 +118,107 @@ class Signal(Base):
     
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
     
+    # Extended validation fields
+    current_state = Column(String(50), default="created")  # created, active, closed, expired
+    processing_time_ms = Column(Float)
+    validation_score = Column(Float, default=0.0)
+    
     __table_args__ = (
         Index('idx_mint_signal_type', 'mint', 'signal_type'),
         Index('idx_signal_type_created', 'signal_type', 'created_at'),
+        Index('idx_signal_id_timestamp', 'signal_id', 'created_at'),
+    )
+
+
+class SignalHistory(Base):
+    """Signal state transition history"""
+    __tablename__ = "signal_history"
+
+    id = Column(Integer, primary_key=True, index=True)
+    signal_id = Column(String(255), nullable=False, index=True)
+    mint = Column(String(255), nullable=False, index=True)
+
+    old_state = Column(String(50))
+    new_state = Column(String(50), nullable=False)
+    reason = Column(Text)
+    details_json = Column(Text)
+
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+    __table_args__ = (
+        Index('idx_sh_signal_id_ts', 'signal_id', 'created_at'),
+        Index('idx_sh_mint_ts', 'mint', 'created_at'),
+    )
+
+
+class TokenLifecycle(Base):
+    """Token status transition lifecycle tracking"""
+    __tablename__ = "token_lifecycle"
+
+    id = Column(Integer, primary_key=True, index=True)
+    mint = Column(String(255), nullable=False, index=True)
+
+    old_status = Column(String(50))
+    new_status = Column(String(50), nullable=False, index=True)
+    event = Column(String(100))
+    reason = Column(Text)
+    details_json = Column(Text)
+
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+    __table_args__ = (
+        Index('idx_tl_mint_ts', 'mint', 'created_at'),
+        Index('idx_token_id_lifecycle_status', 'mint', 'new_status'),
+    )
+
+
+class PerformanceMetrics(Base):
+    """Processing time and system efficiency metrics"""
+    __tablename__ = "performance_metrics"
+
+    id = Column(Integer, primary_key=True, index=True)
+    operation = Column(String(100), nullable=False, index=True)
+    mint = Column(String(255), index=True)
+    signal_id = Column(String(255), index=True)
+
+    duration_ms = Column(Float, nullable=False)
+    success = Column(Boolean, default=True)
+    error_message = Column(Text)
+    metadata_json = Column(Text)
+
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+    __table_args__ = (
+        Index('idx_pm_operation_ts', 'operation', 'created_at'),
+        Index('idx_pm_mint_op', 'mint', 'operation'),
+    )
+
+
+class SignalOutcome(Base):
+    """Signal performance and trading outcome tracking"""
+    __tablename__ = "signal_outcomes"
+
+    id = Column(Integer, primary_key=True, index=True)
+    signal_id = Column(String(255), unique=True, nullable=False, index=True)
+    mint = Column(String(255), nullable=False, index=True)
+    creator = Column(String(255), index=True)
+
+    outcome = Column(String(50))  # WIN, LOSS, NEUTRAL, UNKNOWN
+    entry_price_sol = Column(Float)
+    exit_price_sol = Column(Float)
+    peak_price_sol = Column(Float)
+    return_pct = Column(Float)
+    hold_duration_minutes = Column(Integer)
+
+    notes = Column(Text)
+    metadata_json = Column(Text)
+
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        Index('idx_so_mint_ts', 'mint', 'created_at'),
+        Index('idx_so_creator_outcome', 'creator', 'outcome'),
     )
 
 
