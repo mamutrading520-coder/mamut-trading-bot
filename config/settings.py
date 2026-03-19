@@ -25,10 +25,10 @@ class Settings(BaseSettings):
     database_pool_size: int = 10
     database_echo: bool = False
 
-    # Scoring Thresholds (Lowered for testing - adjust based on actual score distribution)
-    score_threshold_high_potential: float = 50.0  # Changed from 70.0
-    score_threshold_medium_potential: float = 40.0  # Changed from 50.0
-    score_threshold_low_potential: float = 20.0  # Changed from 30.0
+    # Scoring Thresholds 
+    score_threshold_high_potential: float = 70.0
+    score_threshold_medium_potential: float = 50.0
+    score_threshold_low_potential: float = 30.0
 
     # Risk Thresholds
     authority_risk_max: float = 80.0
