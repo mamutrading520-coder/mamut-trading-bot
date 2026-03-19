@@ -1,7 +1,8 @@
 """Main orchestrator that coordinates all Mamut components"""
+
 import asyncio
-from typing import Optional
 from datetime import datetime
+
 from monitoring.logger import setup_logger
 from config.settings import Settings
 from core.event_bus import Event, get_event_bus
@@ -11,6 +12,7 @@ from core.state_manager import StateManager
 from storage.sqlite_store import SQLiteStore
 
 logger = setup_logger("Orchestrator")
+
 
 class Orchestrator:
     """Orchestrates all Mamut components"""
@@ -23,7 +25,7 @@ class Orchestrator:
         self.store = SQLiteStore(settings)
         self.lock_manager = TokenLockManager()
         self.signal_deduper = SignalDeduper()
-        self.state_manager = StateManager(self.store, settings)
+        self.state_manager = StateManager(self.store)
 
         # Component placeholders
         self.pump_listener = None
@@ -46,11 +48,9 @@ class Orchestrator:
         try:
             logger.info("Initializing Mamut orchestrator...")
 
-            # Start event bus
             await self.event_bus.start()
             logger.info("Event bus started")
 
-            # Import and initialize all components
             from discovery.pump_listener import PumpListener
             from validation.raydium_listener import RaydiumListener
             from enrich.token_enricher import TokenEnricher
@@ -62,7 +62,6 @@ class Orchestrator:
             from signals.signal_formatter import SignalFormatter
             from signals.alert_dispatcher import AlertDispatcher
 
-            # Initialize components with correct parameters
             self.pump_listener = PumpListener(self.settings)
             self.raydium_listener = RaydiumListener(self.settings)
             self.token_enricher = TokenEnricher(self.settings)
@@ -70,16 +69,14 @@ class Orchestrator:
             self.trash_filter = TrashFilterEngine(self.store, self.settings)
             self.score_engine = ScoreEngine()
             self.decision_mapper = DecisionMapper(self.settings)
-            self.signal_engine = SignalEngine(self.settings)
+            self.signal_engine = SignalEngine(self.store, self.settings)
             self.signal_formatter = SignalFormatter()
             self.alert_dispatcher = AlertDispatcher(self.store, self.settings)
 
             logger.info("All components initialized")
 
-            # Register event handlers
             await self._register_handlers()
             logger.info("Event handlers registered")
-
             return True
 
         except Exception as e:
@@ -89,27 +86,21 @@ class Orchestrator:
     async def _register_handlers(self) -> None:
         """Register event handlers"""
         try:
-            # Discovery pipeline
             self.event_bus.subscribe("TokenDiscovered", self._handle_token_discovered)
             self.event_bus.subscribe("TokenParsed", self._handle_token_parsed)
 
-            # Enrichment pipeline
             self.event_bus.subscribe("TokenEnriched", self._handle_token_enriched)
             self.event_bus.subscribe("CreatorProfiled", self._handle_creator_profiled)
 
-            # Filtering pipeline
             self.event_bus.subscribe("TokenPassed", self._handle_token_passed)
             self.event_bus.subscribe("TokenRejected", self._handle_token_rejected)
 
-            # Scoring & Decision pipeline
             self.event_bus.subscribe("ScoreCalculated", self._handle_score_calculated)
             self.event_bus.subscribe("DecisionMade", self._handle_decision_made)
 
-            # Signal pipeline
             self.event_bus.subscribe("SignalGenerated", self._handle_signal_generated)
             self.event_bus.subscribe("AlertDispatched", self._handle_alert_dispatched)
 
-            # Validation pipeline
             self.event_bus.subscribe("PoolFound", self._handle_pool_found)
             self.event_bus.subscribe("PoolSearchTimeout", self._handle_pool_timeout)
             self.event_bus.subscribe("MarketConfirmed", self._handle_market_confirmed)
@@ -125,21 +116,18 @@ class Orchestrator:
             mint = event.data.get("mint")
             symbol = event.data.get("symbol")
 
-            # Try to lock token
             if not self.lock_manager.lock_token(mint):
                 logger.debug(f"Token already being processed: {mint[:8]}...")
                 return
 
-            # Initialize token in system
             await self.state_manager.initialize_token(
                 mint,
                 event.data.get("name"),
-                symbol
+                symbol,
             )
 
-            logger.info(f"? TokenDiscovered: {symbol} ({mint[:8]}...)")
+            logger.info(f"TokenDiscovered: {symbol} ({mint[:8]}...)")
 
-            # IMMEDIATELY trigger enrichment
             if self.token_enricher:
                 await self.token_enricher.enrich_and_emit(event)
             else:
@@ -163,10 +151,8 @@ class Orchestrator:
             mint = event.data.get("mint")
             symbol = event.data.get("symbol")
             await self.state_manager.update_token_state(mint, "ENRICHED")
+            logger.info(f"TokenEnriched: {symbol}")
 
-            logger.info(f"? TokenEnriched: {symbol}")
-
-            # TRIGGER creator profiling
             if self.creator_profiler:
                 await self.creator_profiler.profile_and_emit(event)
             else:
@@ -181,10 +167,8 @@ class Orchestrator:
             mint = event.data.get("mint")
             symbol = event.data.get("symbol")
             await self.state_manager.update_token_state(mint, "PROFILED")
+            logger.info(f"CreatorProfiled: {symbol}")
 
-            logger.info(f"? CreatorProfiled: {symbol}")
-
-            # TRIGGER trash filter
             if self.trash_filter:
                 await self.trash_filter.filter_and_emit(event)
             else:
@@ -199,10 +183,8 @@ class Orchestrator:
             mint = event.data.get("mint")
             symbol = event.data.get("symbol")
             await self.state_manager.update_token_state(mint, "PASSED_FILTERS")
+            logger.info(f"TokenPassed Filters: {symbol}")
 
-            logger.info(f"? TokenPassed Filters: {symbol}")
-
-            # TRIGGER scoring
             if self.score_engine:
                 await self.score_engine.score_and_emit(event)
             else:
@@ -218,7 +200,7 @@ class Orchestrator:
             symbol = event.data.get("symbol")
             reason = event.data.get("reason", "Unknown")
 
-            logger.warning(f"? TokenRejected: {symbol} - {reason}")
+            logger.warning(f"TokenRejected: {symbol} - {reason}")
             await self.state_manager.mark_abandoned(mint, reason)
             self.lock_manager.release_token(mint)
 
@@ -232,10 +214,9 @@ class Orchestrator:
             symbol = event.data.get("symbol")
             score = event.data.get("final_score", 0)
 
-            logger.info(f"? ScoreCalculated: {symbol} = {score:.2f}")
+            logger.info(f"ScoreCalculated: {symbol} = {score:.2f}")
             await self.state_manager.update_token_state(mint, "SCORED")
 
-            # TRIGGER decision mapping
             if self.decision_mapper:
                 await self.decision_mapper.map_and_emit(event)
             else:
@@ -251,10 +232,9 @@ class Orchestrator:
             symbol = event.data.get("symbol")
             decision = event.data.get("decision", "UNKNOWN")
 
-            logger.info(f"? DecisionMade: {symbol} = {decision}")
+            logger.info(f"DecisionMade: {symbol} = {decision}")
             await self.state_manager.update_token_state(mint, "DECISION_MADE")
 
-            # Only generate signal if decision is positive
             if decision in ["SIGNAL_EARLY", "MONITOR"]:
                 if self.signal_engine:
                     await self.signal_engine.generate_early_and_emit(event)
@@ -271,10 +251,9 @@ class Orchestrator:
             symbol = event.data.get("symbol")
             signal_type = event.data.get("signal_type", "UNKNOWN")
 
-            logger.info(f"? SignalGenerated: {symbol} ({signal_type})")
+            logger.info(f"SignalGenerated: {symbol} ({signal_type})")
             await self.state_manager.update_token_state(mint, "SIGNAL_GENERATED")
 
-            # TRIGGER alert dispatcher
             if self.alert_dispatcher:
                 await self.alert_dispatcher.dispatch_and_emit(event)
             else:
@@ -288,21 +267,16 @@ class Orchestrator:
         try:
             mint = event.data.get("mint")
             symbol = event.data.get("symbol")
-
-            logger.info(f"? AlertDispatched: {symbol}")
+            logger.info(f"AlertDispatched: {symbol}")
             await self.state_manager.mark_early_signal_sent(mint)
-
         except Exception as e:
             logger.error(f"Error handling AlertDispatched: {e}")
 
     async def _handle_pool_found(self, event: Event) -> None:
         """Handle PoolFound event"""
         try:
-            mint = event.data.get("mint")
             symbol = event.data.get("symbol")
-
-            logger.info(f"? PoolFound: {symbol}")
-
+            logger.info(f"PoolFound: {symbol}")
         except Exception as e:
             logger.error(f"Error handling PoolFound: {e}")
 
@@ -311,21 +285,16 @@ class Orchestrator:
         try:
             mint = event.data.get("mint")
             symbol = event.data.get("symbol")
-
-            logger.warning(f"? PoolSearchTimeout: {symbol}")
+            logger.warning(f"PoolSearchTimeout: {symbol}")
             self.lock_manager.release_token(mint)
-
         except Exception as e:
             logger.error(f"Error handling PoolSearchTimeout: {e}")
 
     async def _handle_market_confirmed(self, event: Event) -> None:
         """Handle MarketConfirmed event"""
         try:
-            mint = event.data.get("mint")
             symbol = event.data.get("symbol")
-
-            logger.info(f"? MarketConfirmed: {symbol}")
-
+            logger.info(f"MarketConfirmed: {symbol}")
         except Exception as e:
             logger.error(f"Error handling MarketConfirmed: {e}")
 
@@ -335,14 +304,12 @@ class Orchestrator:
             self.running = True
             self.start_time = datetime.utcnow()
 
-            # Create tasks for all components
             tasks = [
                 asyncio.create_task(self.pump_listener.start()),
                 asyncio.create_task(self.raydium_listener.monitor_pools()),
                 asyncio.create_task(self._process_tokens()),
             ]
 
-            # Wait for all tasks
             await asyncio.gather(*tasks)
 
         except asyncio.CancelledError:
@@ -356,7 +323,6 @@ class Orchestrator:
         """Background processor for tokens"""
         while self.running:
             try:
-                # Periodic cleanup tasks
                 self.lock_manager.cleanup_expired_locks()
                 self.signal_deduper.cleanup_old_signals()
                 await asyncio.sleep(5)
@@ -367,7 +333,11 @@ class Orchestrator:
         """Get comprehensive system statistics"""
         return {
             "running": self.running,
-            "uptime_seconds": (datetime.utcnow() - self.start_time).total_seconds() if self.start_time else 0,
+            "uptime_seconds": (
+                (datetime.utcnow() - self.start_time).total_seconds()
+                if self.start_time
+                else 0
+            ),
             "tokens_processed": self.tokens_processed,
             "event_bus": self.event_bus.get_listener_count(),
             "lock_manager": self.lock_manager.get_stats(),
@@ -380,15 +350,12 @@ class Orchestrator:
         try:
             logger.info("Cleaning up resources...")
 
-            # Close all components
             if self.token_enricher:
                 await self.token_enricher.close()
             if self.alert_dispatcher:
                 await self.alert_dispatcher.close()
 
-            # Stop event bus
             await self.event_bus.stop()
-
             logger.info("Cleanup completed")
 
         except Exception as e:
@@ -399,4 +366,3 @@ class Orchestrator:
         logger.info("Shutdown requested")
         self.running = False
         await self.cleanup()
-
