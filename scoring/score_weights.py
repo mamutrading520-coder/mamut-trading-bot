@@ -3,25 +3,25 @@ from typing import Dict, Any
 
 # Score weights for different components
 SCORE_WEIGHTS = {
-    "authority_risk": 0.20,      # 20% - Creator authority/permissions
-    "creator_risk": 0.25,         # 25% - Creator reputation & history
-    "concentration_risk": 0.20,   # 20% - Token holder concentration
-    "flow_score": 0.20,          # 20% - Initial trading flow quality
-    "holder_quality": 0.15,      # 15% - Buyer/holder quality
+    "authority_risk": 0.15,      # 15% - less weight (limited variance from pump.fun data)
+    "creator_risk": 0.30,         # 30% - strongest predictor
+    "concentration_risk": 0.25,   # 25% - critical for quality
+    "flow_score": 0.20,          # 20% - maintained (now improved)
+    "holder_quality": 0.10,      # 10% - less weight (limited early data)
 }
 
 # Risk level thresholds
 RISK_THRESHOLDS = {
-    "high_potential": 50,         # Score >= 50: HIGH_POTENTIAL (TESTING: lowered from 75)
-    "medium_potential": 40,       # Score 40-49: MEDIUM_POTENTIAL
-    "low_potential": 20,          # Score 20-39: LOW_POTENTIAL
+    "high_potential": 65,         # Score >= 65: HIGH_POTENTIAL
+    "medium_potential": 50,       # Score 50-64: MEDIUM_POTENTIAL
+    "low_potential": 20,          # Score 20-49: LOW_POTENTIAL
     "trash": 0,                   # Score < 20: TRASH
 }
 
 # Risk level thresholds (alternative name used by decision_mapper)
 RISK_LEVEL_THRESHOLDS = {
-    "HIGH_POTENTIAL": 50,
-    "MEDIUM_POTENTIAL": 40,
+    "HIGH_POTENTIAL": 65,
+    "MEDIUM_POTENTIAL": 50,
     "LOW_POTENTIAL": 20,
     "TRASH": 0,
 }
