@@ -32,23 +32,38 @@ class ScoreEngine:
             v_tokens_in_bonding = token_data.get("v_tokens_in_bonding_curve", 0)
             v_sol_in_bonding = token_data.get("v_sol_in_bonding_curve", 0)
 
-            score = 50.0
+            # Start lower to force tokens to earn higher scores
+            score = 30.0
 
             min_initial_sol = FLOW_ANALYSIS_THRESHOLDS.get("min_volume_threshold", 0.5)
-            if initial_sol >= min_initial_sol:
-                score += 15.0
-
             min_initial_buyers = FLOW_ANALYSIS_THRESHOLDS.get("min_initial_buyers", 5)
-            if initial_buy >= min_initial_buyers:
-                score += 15.0
 
+            # initial_sol contribution - proportional scoring for wider differentiation
+            if initial_sol < 0.01:
+                # Very low initial liquidity: aggressive penalty
+                score -= 10.0
+            elif initial_sol >= min_initial_sol:
+                # Above threshold: scale bonus with sol amount (base 20, up to 30, +5 per extra threshold)
+                sol_ratio = initial_sol / min_initial_sol
+                score += min(30.0, 20.0 + (sol_ratio - 1.0) * 5.0)
+            else:
+                # Partial credit proportional to threshold proximity
+                score += (initial_sol / min_initial_sol) * 20.0
+
+            # initial_buy multiplier - ratio-based for better differentiation
+            if initial_buy >= min_initial_buyers:
+                # Above threshold: scale bonus with buy count (base 15, up to 20, +2 per extra threshold)
+                buy_ratio = initial_buy / min_initial_buyers
+                score += min(20.0, 15.0 + (buy_ratio - 1.0) * 2.0)
+            elif initial_buy > 0:
+                # Partial credit proportional to threshold proximity
+                score += (initial_buy / min_initial_buyers) * 10.0
+
+            # Bonding curve ratio bonus
             if v_tokens_in_bonding > 0 and v_sol_in_bonding > 0:
                 curve_ratio = v_sol_in_bonding / v_tokens_in_bonding
                 if 0.000001 <= curve_ratio <= 0.01:
                     score += 10.0
-
-            if initial_sol < 0.01:
-                score -= 20.0
 
             return max(0.0, min(100.0, score))
 
