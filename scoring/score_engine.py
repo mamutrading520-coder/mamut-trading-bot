@@ -80,13 +80,25 @@ class ScoreEngine:
             return 60.0
 
     def _extract_risk_scores(self, filter_results: Dict[str, Any]) -> Dict[str, float]:
-        """Extract individual risk scores from filter results"""
+        """Extract individual risk scores from filter results.
+
+        Checks the new format first (direct top-level keys emitted by
+        TrashFilterEngine in the TokenPassed event), then falls back to the
+        legacy nested ``checks`` dictionary for backward compatibility.
+        Each score is resolved independently so mixed formats are handled
+        gracefully.
+        """
         checks = filter_results.get("checks", {})
 
+        def _get(new_key: str, legacy_key: str, default: float = 50.0) -> float:
+            if new_key in filter_results:
+                return float(filter_results[new_key])
+            return checks.get(legacy_key, {}).get("score", default)
+
         return {
-            "authority": checks.get("authority", {}).get("score", 50.0),
-            "creator": checks.get("creator_risk", {}).get("score", 50.0),
-            "concentration": checks.get("concentration", {}).get("score", 50.0),
+            "authority": _get("authority_risk", "authority"),
+            "creator": _get("creator_risk", "creator_risk"),
+            "concentration": _get("concentration_risk", "concentration"),
         }
 
     def calculate_score(
