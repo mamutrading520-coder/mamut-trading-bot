@@ -76,6 +76,7 @@ class StateManager:
                     "symbol": symbol or "",
                     "lifecycle_status": "DISCOVERED",
                 }
+
                 try:
                     self.store.create_token(token_data)
                 except Exception as db_error:
@@ -84,12 +85,16 @@ class StateManager:
                     return False
 
             self.token_states[mint] = "DISCOVERED"
+
             self._record_lifecycle(
                 mint=mint,
                 new_status="DISCOVERED",
                 event="TokenDiscovered",
                 reason=None,
-                details={"name": name or "", "symbol": symbol or ""},
+                details={
+                    "name": name or "",
+                    "symbol": symbol or "",
+                },
             )
 
             logger.debug(f"Token {mint[:8]}... initialized")
@@ -110,6 +115,8 @@ class StateManager:
     ) -> bool:
         """
         Actualiza el estado actual del token en memoria y persistencia.
+        Registra primero la transición de lifecycle y después consolida
+        el estado actual en memoria y en la tabla tokens.
         """
         if not mint:
             logger.error("update_token_state called without mint")
@@ -117,9 +124,21 @@ class StateManager:
             return False
 
         normalized_state = self._normalize_state(state)
-        old_state = self.token_states.get(mint)
+        current_state = self.token_states.get(mint)
 
         try:
+            if current_state == normalized_state:
+                logger.debug(f"Token {mint[:8]}... already in state {normalized_state}")
+                return True
+
+            self._record_lifecycle(
+                mint=mint,
+                new_status=normalized_state,
+                event=event,
+                reason=reason,
+                details=details,
+            )
+
             self.token_states[mint] = normalized_state
 
             try:
@@ -133,15 +152,6 @@ class StateManager:
                 logger.warning(
                     f"Could not update token lifecycle_status for {mint[:8]}...: {db_error}"
                 )
-
-            self._record_lifecycle(
-                mint=mint,
-                new_status=normalized_state,
-                event=event,
-                reason=reason,
-                details=details,
-                old_status=old_state,
-            )
 
             logger.debug(
                 f"Token {mint[:8]}... state -> {normalized_state}"
@@ -157,6 +167,8 @@ class StateManager:
     async def mark_abandoned(self, mint: str, reason: str) -> bool:
         """
         Marca un token como abandonado/rechazado y persiste la razón.
+        Registra primero la transición en token_lifecycle y después
+        consolida el estado actual en memoria y en la tabla tokens.
         """
         if not mint:
             logger.error("mark_abandoned called without mint")
@@ -164,6 +176,14 @@ class StateManager:
             return False
 
         try:
+            self._record_lifecycle(
+                mint=mint,
+                new_status="ABANDONED",
+                event="TokenRejected",
+                reason=reason,
+                details=None,
+            )
+
             self.token_states[mint] = "ABANDONED"
 
             try:
@@ -178,14 +198,6 @@ class StateManager:
                 )
             except Exception as db_error:
                 logger.warning(f"Could not persist abandoned state for {mint[:8]}...: {db_error}")
-
-            self._record_lifecycle(
-                mint=mint,
-                new_status="ABANDONED",
-                event="TokenRejected",
-                reason=reason,
-                details=None,
-            )
 
             self.abandoned_tokens += 1
             logger.debug(f"Token {mint[:8]}... abandoned: {reason}")
@@ -244,6 +256,7 @@ class StateManager:
 
         if normalized not in self.VALID_STATES:
             logger.warning(f"Unknown token state received: {normalized}")
+
         return normalized
 
     def _record_lifecycle(
@@ -253,12 +266,12 @@ class StateManager:
         event: Optional[str] = None,
         reason: Optional[str] = None,
         details: Optional[Dict[str, Any]] = None,
-        old_status: Optional[str] = None,
     ) -> None:
         """
         Persiste la transición en token_lifecycle si el store lo soporta.
         """
         details_json = None
+
         if details:
             try:
                 details_json = json.dumps(details, ensure_ascii=False, default=str)
@@ -268,9 +281,6 @@ class StateManager:
                 )
 
         try:
-            if old_status is None:
-                old_status = self.token_states.get(mint)
-
             self.store.update_token_lifecycle(
                 mint=mint,
                 status=new_status,
