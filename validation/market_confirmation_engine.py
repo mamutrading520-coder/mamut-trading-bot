@@ -1,226 +1,220 @@
-﻿"""Confirm market conditions and generate confirmation signals"""
-from typing import Dict, Any, Optional
-from datetime import datetime
-from monitoring.logger import setup_logger
-from core.event_bus import Event, get_event_bus
-from config.settings import Settings
+"""Confirm market conditions after Raydium pool validation"""
+
+from __future__ import annotations
+
 import uuid
+from datetime import datetime
+from typing import Dict, Any
+
+from monitoring.logger import setup_logger
+from config.settings import Settings
+from config.thresholds import SIGNAL_THRESHOLDS
 
 logger = setup_logger("MarketConfirmationEngine")
 
+
 class MarketConfirmationEngine:
-    """Confirms market conditions for token validation"""
-    
+    """Confirms market conditions for a token after Raydium pool validation."""
+
     def __init__(self, settings: Settings):
         self.settings = settings
-        self.event_bus = get_event_bus()
         self.confirmations_made = 0
         self.confirmations_failed = 0
-    
+
     def _analyze_pool_quality(self, pool_validation: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Analyze pool quality metrics
-        
-        Args:
-            pool_validation: Pool validation results
-            
-        Returns:
-            Quality analysis
+        Analyze validated pool quality and build a normalized quality summary.
         """
+        checks = pool_validation.get("checks", {}) or {}
+        liquidity_sol = float(pool_validation.get("liquidity_sol", 0.0) or 0.0)
+        validation_score = float(pool_validation.get("validation_score", 0.0) or 0.0)
+
         analysis = {
-            "pool_valid": pool_validation.get("is_valid", False),
-            "liquidity_sol": pool_validation.get("liquidity_sol", 0.0),
-            "quality_score": 50.0,
+            "pool_valid": bool(pool_validation.get("is_valid", False)),
+            "liquidity_sol": liquidity_sol,
+            "validation_score": validation_score,
+            "quality_score": 0.0,
+            "market_stage": "UNCONFIRMED",
             "quality_factors": [],
+            "warnings": list(pool_validation.get("warnings", []) or []),
         }
-        
+
         if not analysis["pool_valid"]:
-            analysis["quality_score"] = 20.0
+            analysis["quality_score"] = max(10.0, validation_score * 0.4)
             analysis["quality_factors"].append("Pool validation failed")
             return analysis
-        
-        score = 70.0  # Base score for valid pool
-        
-        # Factor: Liquidity
-        liquidity = analysis["liquidity_sol"]
-        if liquidity > 100:
+
+        score = 55.0
+
+        # Reuse validator score as base confidence anchor
+        score += min(validation_score * 0.25, 20.0)
+
+        # Liquidity quality
+        if liquidity_sol >= 100:
             score += 15.0
-            analysis["quality_factors"].append(f"Strong liquidity: {liquidity:.2f} SOL")
-        elif liquidity > 50:
+            analysis["quality_factors"].append(f"Strong liquidity: {liquidity_sol:.2f} SOL")
+        elif liquidity_sol >= 50:
             score += 10.0
-            analysis["quality_factors"].append(f"Adequate liquidity: {liquidity:.2f} SOL")
-        elif liquidity > 10:
+            analysis["quality_factors"].append(f"Good liquidity: {liquidity_sol:.2f} SOL")
+        elif liquidity_sol >= 10:
             score += 5.0
-            analysis["quality_factors"].append(f"Minimal liquidity: {liquidity:.2f} SOL")
-        
-        # Factor: Program validation
-        checks = pool_validation.get("checks", {})
+            analysis["quality_factors"].append(f"Tradable liquidity: {liquidity_sol:.2f} SOL")
+        else:
+            analysis["warnings"].append(f"Low liquidity: {liquidity_sol:.2f} SOL")
+
+        # Program check
         if checks.get("program_id", {}).get("valid"):
-            score += 10.0
-            analysis["quality_factors"].append("Official Raydium program")
-        
-        # Factor: Pool age
-        if checks.get("pool_age", {}).get("valid"):
             score += 5.0
-            analysis["quality_factors"].append("Pool age verified")
-        
-        analysis["quality_score"] = min(100.0, score)
+            analysis["quality_factors"].append("Official/accepted Raydium program")
+
+        # Pool age check
+        pool_age = checks.get("pool_age", {}) or {}
+        if pool_age.get("valid"):
+            score += 5.0
+            analysis["quality_factors"].append("Pool age validated")
+
+            age_minutes = float(pool_age.get("pool_age_minutes", 0.0) or 0.0)
+            if age_minutes <= 15:
+                analysis["market_stage"] = "EARLY_ACTIVE"
+            elif age_minutes <= 60:
+                analysis["market_stage"] = "ACTIVE"
+            else:
+                analysis["market_stage"] = "MATURE"
+        else:
+            analysis["warnings"].append("Pool age not validated")
+
+        # Quote asset check
+        if checks.get("quote_asset", {}).get("valid"):
+            score += 5.0
+            analysis["quality_factors"].append("Allowed quote asset")
+
+        analysis["quality_score"] = min(100.0, round(score, 2))
         return analysis
-    
+
     def _calculate_confidence_boost(
         self,
-        initial_score: float,
-        pool_quality: Dict[str, Any]
+        initial_confidence: float,
+        pool_quality: Dict[str, Any],
     ) -> float:
         """
-        Calculate confidence boost from market validation
-        
-        Args:
-            initial_score: Initial signal confidence
-            pool_quality: Pool quality analysis
-            
-        Returns:
-            New confidence level (0-1)
+        Calculate confidence boost after pool validation and market confirmation.
         """
-        base_confidence = initial_score
-        
-        if not pool_quality.get("pool_valid"):
-            return base_confidence * 0.5  # Reduce if pool not valid
-        
-        # Boost confidence based on quality
-        quality_score = pool_quality.get("quality_score", 50)
-        quality_boost = (quality_score / 100) * 0.2  # Max 20% boost
-        
-        new_confidence = min(0.99, base_confidence + quality_boost)
-        
-        return new_confidence
-    
+        base_confidence = float(initial_confidence or 0.0)
+
+        if not pool_quality.get("pool_valid", False):
+            return max(0.05, round(base_confidence * 0.5, 4))
+
+        quality_score = float(pool_quality.get("quality_score", 0.0) or 0.0)
+
+        # Max boost ~0.20, proportional to quality
+        boost = (quality_score / 100.0) * 0.20
+        new_confidence = min(0.99, base_confidence + boost)
+        return round(new_confidence, 4)
+
     async def confirm_market(
         self,
         token_data: Dict[str, Any],
         initial_signal: Dict[str, Any],
-        pool_validation: Dict[str, Any]
+        pool_validation: Dict[str, Any],
     ) -> Dict[str, Any]:
         """
-        Confirm market conditions for token
-        
-        Args:
-            token_data: Token data
-            initial_signal: Initial signal data
-            pool_validation: Pool validation results
-            
-        Returns:
-            Market confirmation results
+        Confirm market conditions using real validator output.
+
+        Returns a structured result for the orchestrator, which remains the only
+        component responsible for emitting the MarketConfirmed event.
         """
         try:
             mint = token_data.get("mint")
+            symbol = token_data.get("symbol", "UNKNOWN")
+
             logger.debug(f"Confirming market conditions for {mint[:8]}...")
-            
-            # Analyze pool quality
+
             pool_quality = self._analyze_pool_quality(pool_validation)
-            
-            # Calculate new confidence
-            initial_confidence = initial_signal.get("confidence", 0.7)
+
+            initial_confidence = float(
+                initial_signal.get(
+                    "confidence",
+                    token_data.get("confidence", 0.5),
+                ) or 0.5
+            )
             new_confidence = self._calculate_confidence_boost(
                 initial_confidence,
-                pool_quality
+                pool_quality,
             )
-            
-            # Determine confirmation status
+
+            min_confirmation_score = float(
+                SIGNAL_THRESHOLDS.get("min_confirmation_score", 65)
+            )
+
             is_confirmed = (
-                pool_quality["pool_valid"] and
-                pool_quality["quality_score"] >= 60
+                pool_quality.get("pool_valid", False)
+                and float(pool_quality.get("quality_score", 0.0)) >= min_confirmation_score
             )
-            
+
+            reasons = []
+            if is_confirmed:
+                reasons.append("Raydium pool validated")
+                reasons.extend(pool_quality.get("quality_factors", []))
+            else:
+                reasons.append("Market confirmation threshold not met")
+                reasons.extend(pool_quality.get("warnings", []))
+
             confirmation = {
                 "mint": mint,
+                "symbol": symbol,
                 "confirmation_id": f"CONFIRM-{uuid.uuid4().hex[:12]}",
                 "is_confirmed": is_confirmed,
-                "pool_quality": pool_quality,
+                "reason": reasons[0] if reasons else "Market confirmation evaluated",
+                "reasons": reasons,
                 "initial_confidence": initial_confidence,
                 "new_confidence": new_confidence,
-                "confidence_boost": new_confidence - initial_confidence,
+                "confidence_boost": round(new_confidence - initial_confidence, 4),
+                "score": float(
+                    token_data.get(
+                        "final_score",
+                        initial_signal.get("score", 0.0),
+                    ) or 0.0
+                ),
+                "risk_level": token_data.get(
+                    "decision",
+                    initial_signal.get("decision", "CONFIRMED"),
+                ),
+                "market_stage": pool_quality.get("market_stage", "UNCONFIRMED"),
+                "pool_quality": pool_quality,
+                "pool_validation": pool_validation,
+                "pool": {
+                    "id": pool_validation.get("pool_id"),
+                    "pool_id": pool_validation.get("pool_id"),
+                    "pool_address": pool_validation.get("pool_address"),
+                    "liquidity_sol": pool_validation.get("liquidity_sol", 0.0),
+                },
+                "checks": pool_validation.get("checks", {}),
                 "timestamp": datetime.utcnow().isoformat(),
             }
-            
+
             self.confirmations_made += 1
-            
+
             if is_confirmed:
-                logger.info(f"Market confirmed for {mint[:8]}... - confidence: {new_confidence:.1%}")
+                logger.info(
+                    f"Market confirmed for {mint[:8]}... | confidence={new_confidence:.1%}"
+                )
             else:
                 logger.warning(f"Market confirmation failed for {mint[:8]}...")
-                self.confirmations_failed += 1
-            
+
             return confirmation
-            
+
         except Exception as e:
             logger.error(f"Error confirming market: {e}")
             self.confirmations_failed += 1
             return {
                 "mint": token_data.get("mint"),
+                "symbol": token_data.get("symbol", "UNKNOWN"),
                 "error": str(e),
                 "is_confirmed": False,
             }
-    
-    async def confirm_and_emit(
-        self,
-        event: Event,
-        token_data: Dict[str, Any],
-        initial_signal: Dict[str, Any]
-    ) -> bool:
-        """
-        Confirm market and emit result event
-        
-        Args:
-            event: PoolFound event
-            token_data: Token data
-            initial_signal: Initial signal data
-            
-        Returns:
-            True if confirmed and signal emitted, False otherwise
-        """
-        try:
-            pool_data = event.data.get("pool", {})
-            
-            # Validate pool (already done by validator, but recheck)
-            pool_validation = {
-                "pool_id": pool_data.get("pool_id"),
-                "is_valid": True,  # Assume valid since it's from validator
-                "liquidity_sol": pool_data.get("liquidity_sol", 0),
-                "checks": pool_data.get("checks", {}),
-            }
-            
-            # Confirm market
-            confirmation = await self.confirm_market(
-                token_data,
-                initial_signal,
-                pool_validation
-            )
-            
-            if not confirmation.get("is_confirmed"):
-                logger.debug(f"Market not confirmed, no signal emitted")
-                return False
-            
-            # Emit confirmation event
-            confirm_event = Event(
-                event_type="MarketConfirmed",
-                data=confirmation,
-                source="MarketConfirmationEngine",
-                timestamp=datetime.utcnow()
-            )
-            
-            await self.event_bus.emit(confirm_event)
-            logger.debug(f"Emitted MarketConfirmed event")
-            
-            return True
-            
-        except Exception as e:
-            logger.error(f"Error in confirm_and_emit: {e}")
-            self.confirmations_failed += 1
-            return False
-    
+
     def get_stats(self) -> dict:
-        """Get confirmation engine statistics"""
+        """Get confirmation engine statistics."""
         total = self.confirmations_made + self.confirmations_failed
         return {
             "confirmations_made": self.confirmations_made,
