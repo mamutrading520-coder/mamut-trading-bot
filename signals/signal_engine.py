@@ -226,49 +226,59 @@ class SignalEngine:
             logger.error(f"Error in generate_confirmed_and_emit: {e}")
             return False
 
-    def _persist_signal(
-        self,
-        signal: SignalData,
-        old_state: Optional[str],
-        new_state: str,
-        history_reason: str,
-        operation_name: str,
-        started_at: float,
-    ) -> None:
-        """Persist signal, history and performance metrics."""
+   async def _persist_signal(self, signal_data: Dict[str, Any]) -> None:
+    """Persist signal to database with full structured payload."""
+    if not self.store:
+        return
+
+    start_time = time.time()
+
+    try:
+        signal_db_data = {
+            "signal_id": signal_data["signal_id"],
+            "mint": signal_data["mint"],
+            "symbol": signal_data.get("symbol", "UNKNOWN"),
+            "signal_type": signal_data["signal_type"],
+            "score": signal_data["score"],
+            "confidence": signal_data.get("confidence", 0.0),
+            "reason": signal_data.get("reason", ""),
+            "metadata": signal_data.get("metadata", {}) or {},
+            "processing_time_ms": signal_data.get("processing_time_ms"),
+        }
+
+        self.store.create_structured_signal(signal_db_data)
+
+        processing_time_ms = (time.time() - start_time) * 1000
+        self.store.create_performance_metric(
+            operation="signal_persistence",
+            mint=signal_data["mint"],
+            signal_id=signal_data["signal_id"],
+            duration_ms=processing_time_ms,
+            success=True,
+            metadata={
+                "signal_type": signal_data["signal_type"],
+                "score": signal_data["score"],
+            },
+        )
+
+    except Exception as e:
+        logger.error(f"Failed to persist signal {signal_data.get('signal_id', 'unknown')}: {e}")
+
         try:
-            signal_db_data = {
-                "signal_id": signal.signal_id,
-                "mint": signal.mint,
-                "symbol": signal.symbol,
-                "signal_type": signal.signal_type,
-                "score": signal.score,
-                "confidence": signal.confidence,
-                "reason": signal.reason,
-            }
-            self.store.create_signal(signal_db_data)
-
-            self.store.create_signal_history(
-                signal_id=signal.signal_id,
-                mint=signal.mint,
-                old_state=old_state,
-                new_state=new_state,
-                reason=history_reason,
+            processing_time_ms = (time.time() - start_time) * 1000
+            self.store.create_performance_metric(
+                operation="signal_persistence",
+                mint=signal_data.get("mint"),
+                signal_id=signal_data.get("signal_id"),
+                duration_ms=processing_time_ms,
+                success=False,
+                error_message=str(e),
+                metadata={
+                    "signal_type": signal_data.get("signal_type"),
+                },
             )
-
-            generation_time_ms = (time.time() - started_at) * 1000
-            self.store.record_performance_metric(
-                operation=operation_name,
-                duration_ms=generation_time_ms,
-                signal_id=signal.signal_id,
-                success=True,
-            )
-
-            logger.info(f"Signal persisted to DB: {signal.signal_id}")
-
-        except Exception as db_error:
-            logger.error(f"Error persisting signal to DB: {db_error}")
-            raise
+        except Exception as perf_error:
+            logger.error(f"Failed to persist performance metric: {perf_error}")
 
     @staticmethod
     def _safe_float(value: Any, default: float = 0.0) -> float:
