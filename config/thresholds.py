@@ -121,11 +121,11 @@ RAYDIUM_VALIDATION_CONFIG = {
         "675kPX9MHTjS2zt1qLCcV32qxPMoVvmT9nDpFoUGmJ7",
         "9W959DqBbTRAu7fkCuJicPSC8kSrWznqXX8XcXLEKSJ",
     ],
+    "min_liquidity_sol": 10.0,
     "min_pool_age_minutes": 0,
     "max_pool_age_minutes": 30,
-    "min_liquidity_sol": 10.0,
     "allowed_quote_mints": [
-        "So11111111111111111111111111111111111111112",  # SOL
+        "So11111111111111111111111111111111111111112",
     ],
 }
 
