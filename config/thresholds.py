@@ -115,11 +115,16 @@ RAYDIUM_THRESHOLDS = {
 
 # Raydium Validation Config
 RAYDIUM_VALIDATION_CONFIG = {
-    "min_liquidity_usd": 1000,
-    "min_liquidity_sol": 5.0,
-    "max_price_impact": 10,
-    "min_pool_age_minutes": 1,
-    "max_pool_age_hours": 24,
+    "official_program_ids": [
+        "675kPX9MHTjS2zt1qLCcV32qxPMoVvmT9nDpFoUGmJ7",
+        "9W959DqBbTRAu7fkCuJicPSC8kSrWznqXX8XcXLEKSJ",
+    ],
+    "min_pool_age_minutes": 0,
+    "max_pool_age_minutes": 30,
+    "min_liquidity_sol": 10.0,
+    "allowed_quote_mints": [
+        "So11111111111111111111111111111111111111112",  # SOL
+    ],
 }
 
 # Signal Generation Thresholds
