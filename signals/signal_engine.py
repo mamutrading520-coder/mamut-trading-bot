@@ -226,60 +226,68 @@ class SignalEngine:
             logger.error(f"Error in generate_confirmed_and_emit: {e}")
             return False
 
-   async def _persist_signal(self, signal_data: Dict[str, Any]) -> None:
-    """Persist signal to database with full structured payload."""
-    if not self.store:
-        return
+    def _persist_signal(
+        self,
+        signal: SignalData,
+        old_state: Optional[str] = None,
+        new_state: str = "CREATED",
+        history_reason: Optional[str] = None,
+        operation_name: str = "signal_persistence",
+        started_at: Optional[float] = None,
+    ) -> None:
+        """Persist signal to database with full structured payload."""
+        if not self.store:
+            return
 
-    start_time = time.time()
-
-    try:
-        signal_db_data = {
-            "signal_id": signal_data["signal_id"],
-            "mint": signal_data["mint"],
-            "symbol": signal_data.get("symbol", "UNKNOWN"),
-            "signal_type": signal_data["signal_type"],
-            "score": signal_data["score"],
-            "confidence": signal_data.get("confidence", 0.0),
-            "reason": signal_data.get("reason", ""),
-            "metadata": signal_data.get("metadata", {}) or {},
-            "processing_time_ms": signal_data.get("processing_time_ms"),
-        }
-
-        self.store.create_structured_signal(signal_db_data)
-
-        processing_time_ms = (time.time() - start_time) * 1000
-        self.store.create_performance_metric(
-            operation="signal_persistence",
-            mint=signal_data["mint"],
-            signal_id=signal_data["signal_id"],
-            duration_ms=processing_time_ms,
-            success=True,
-            metadata={
-                "signal_type": signal_data["signal_type"],
-                "score": signal_data["score"],
-            },
-        )
-
-    except Exception as e:
-        logger.error(f"Failed to persist signal {signal_data.get('signal_id', 'unknown')}: {e}")
+        started_at = started_at or time.time()
 
         try:
-            processing_time_ms = (time.time() - start_time) * 1000
+            signal_db_data = {
+                "signal_id": signal.signal_id,
+                "mint": signal.mint,
+                "symbol": signal.symbol,
+                "signal_type": signal.signal_type,
+                "score": signal.score,
+                "confidence": signal.confidence,
+                "reason": signal.reason,
+                "metadata": signal.metadata or {},
+                "processing_time_ms": (time.time() - started_at) * 1000,
+            }
+
+            self.store.create_structured_signal(signal_db_data)
+
             self.store.create_performance_metric(
-                operation="signal_persistence",
-                mint=signal_data.get("mint"),
-                signal_id=signal_data.get("signal_id"),
-                duration_ms=processing_time_ms,
-                success=False,
-                error_message=str(e),
+                operation=operation_name,
+                mint=signal.mint,
+                signal_id=signal.signal_id,
+                duration_ms=(time.time() - started_at) * 1000,
+                success=True,
                 metadata={
-                    "signal_type": signal_data.get("signal_type"),
+                    "signal_type": signal.signal_type,
+                    "score": signal.score,
+                    "risk_level": signal.risk_level,
                 },
             )
-        except Exception as perf_error:
-            logger.error(f"Failed to persist performance metric: {perf_error}")
 
+        except Exception as e:
+            logger.error(f"Failed to persist signal {signal.signal_id}: {e}")
+
+            try:
+                self.store.create_performance_metric(
+                    operation=operation_name,
+                    mint=signal.mint,
+                    signal_id=signal.signal_id,
+                    duration_ms=(time.time() - started_at) * 1000,
+                    success=False,
+                    error_message=str(e),
+                    metadata={
+                        "signal_type": signal.signal_type,
+                        "risk_level": signal.risk_level,
+                    },
+                )
+            except Exception as perf_error:
+                logger.error(f"Failed to persist performance metric: {perf_error}")
+            
     @staticmethod
     def _safe_float(value: Any, default: float = 0.0) -> float:
         """Convert values safely to float."""
