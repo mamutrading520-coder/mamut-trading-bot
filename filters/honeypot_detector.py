@@ -1,165 +1,198 @@
-from typing import Any, Dict, List
-from loguru import logger
+"""Detect suspicious / honeypot-like token patterns for Solana tokens"""
+
+from __future__ import annotations
+
+from typing import Dict, Any, List
+
+from monitoring.logger import setup_logger
+
+logger = setup_logger("HoneypotDetector")
 
 
 class HoneypotDetector:
     """
-    Early-stage honeypot and trap-risk heuristic detector.
+    Detecta señales de alto riesgo en tokens Solana.
 
-    This detector does not simulate swaps. It scores risk based on
-    metadata, authority state, liquidity conditions and suspicious
-    token characteristics available during early discovery.
+    No intenta afirmar un honeypot “estricto” estilo EVM.
+    Evalúa si el token parece manipulable, congelable, poco confiable
+    o con demasiadas banderas como para tratarlo como oportunidad seria.
     """
 
-    def __init__(self) -> None:
-        logger.debug("HoneypotDetector initialized")
+    def __init__(self, settings=None):
+        self.settings = settings
+        self.analyzed_count = 0
+        self.suspicious_count = 0
 
     async def analyze(self, token_data: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Analyze token data and return a heuristic honeypot risk profile.
+        Analyze token for suspicious / honeypot-like characteristics.
+
+        Expected input can include:
+        - mint_authority
+        - freeze_authority
+        - owner_renounced
+        - total_supply
+        - metadata_score
+        - metadata_risk_flags
+        - creator_tokens_created / creator_failure_rate / creator_success_rate
+        - top_holder_ratio / holder_concentration / wallet_cluster_score
         """
         try:
-            risk_score = 0
-            risk_flags: List[str] = []
+            self.analyzed_count += 1
 
-            mint_authority = self._as_bool(token_data.get("mint_authority"))
-            freeze_authority = self._as_bool(token_data.get("freeze_authority"))
-            liquidity_locked = self._as_bool(token_data.get("liquidity_locked"))
-            has_website = self._as_bool(token_data.get("has_website"))
-            has_twitter = self._as_bool(token_data.get("has_twitter"))
-            has_telegram = self._as_bool(token_data.get("has_telegram"))
+            reasons: List[str] = []
+            warnings: List[str] = []
+            penalties: List[float] = []
 
-            holder_count = self._as_int(token_data.get("holder_count"))
-            top_holder_percentage = self._as_float(token_data.get("top_holder_percentage"))
-            creator_hold_percentage = self._as_float(token_data.get("creator_hold_percentage"))
-            buy_tax = self._as_float(token_data.get("buy_tax"))
-            sell_tax = self._as_float(token_data.get("sell_tax"))
-            liquidity_usd = self._as_float(token_data.get("liquidity_usd"))
-            volume_5m = self._as_float(token_data.get("volume_5m"))
-            metadata_score = self._as_float(token_data.get("metadata_score"))
+            mint_authority = token_data.get("mint_authority")
+            freeze_authority = token_data.get("freeze_authority")
+            owner_renounced = bool(token_data.get("owner_renounced", False))
+            total_supply = int(token_data.get("total_supply", 0) or 0)
+
+            metadata_score = float(token_data.get("metadata_score", 0.0) or 0.0)
+            metadata_flags = list(token_data.get("metadata_risk_flags", []) or [])
+
+            creator_failure_rate = float(token_data.get("creator_failure_rate", 0.0) or 0.0)
+            creator_success_rate = float(token_data.get("creator_success_rate", 0.0) or 0.0)
+            creator_tokens_created = int(token_data.get("creator_tokens_created", 0) or 0)
+
+            top_holder_ratio = float(token_data.get("top_holder_ratio", 0.0) or 0.0)
+            holder_concentration = float(token_data.get("holder_concentration", 0.0) or 0.0)
+            wallet_cluster_score = float(token_data.get("wallet_cluster_score", 0.0) or 0.0)
+
+            # 1) Authorities
+            if freeze_authority:
+                reasons.append("Freeze authority activa")
+                penalties.append(30.0)
 
             if mint_authority:
-                risk_score += 20
-                risk_flags.append("mint_authority_enabled")
+                reasons.append("Mint authority activa")
+                penalties.append(20.0)
 
-            if freeze_authority:
-                risk_score += 20
-                risk_flags.append("freeze_authority_enabled")
+            if not owner_renounced:
+                warnings.append("Owner no renounced")
+                penalties.append(10.0)
 
-            if not liquidity_locked:
-                risk_score += 15
-                risk_flags.append("liquidity_not_locked")
+            # 2) Supply sanity
+            if total_supply <= 0:
+                reasons.append("Supply inválido o no disponible")
+                penalties.append(20.0)
+            elif total_supply < 1_000:
+                warnings.append("Supply extremadamente bajo")
+                penalties.append(5.0)
 
-            if holder_count <= 10:
-                risk_score += 12
-                risk_flags.append("very_low_holder_count")
-            elif holder_count <= 25:
-                risk_score += 6
-                risk_flags.append("low_holder_count")
+            # 3) Metadata quality
+            if metadata_score < 20:
+                reasons.append("Metadata muy pobre o sospechosa")
+                penalties.append(20.0)
+            elif metadata_score < 40:
+                warnings.append("Metadata débil")
+                penalties.append(10.0)
 
-            if top_holder_percentage >= 35:
-                risk_score += 18
-                risk_flags.append("top_holder_concentrated")
-            elif top_holder_percentage >= 20:
-                risk_score += 10
-                risk_flags.append("top_holder_elevated")
+            suspicious_metadata_flags = {
+                "suspicious_name",
+                "suspicious_symbol",
+                "missing_description",
+                "missing_socials",
+                "suspicious_links",
+                "spam_language",
+            }
 
-            if creator_hold_percentage >= 20:
-                risk_score += 18
-                risk_flags.append("creator_allocation_high")
-            elif creator_hold_percentage >= 10:
-                risk_score += 10
-                risk_flags.append("creator_allocation_elevated")
+            flagged = suspicious_metadata_flags.intersection(set(metadata_flags))
+            if flagged:
+                warnings.append(f"Flags metadata: {', '.join(sorted(flagged))}")
+                penalties.append(min(len(flagged) * 4.0, 16.0))
 
-            if buy_tax >= 15:
-                risk_score += 10
-                risk_flags.append("buy_tax_high")
+            # 4) Creator behavior
+            if creator_tokens_created >= 5 and creator_failure_rate >= 0.80:
+                reasons.append("Creador con historial muy negativo")
+                penalties.append(20.0)
+            elif creator_tokens_created >= 3 and creator_success_rate <= 0.10:
+                warnings.append("Creador con baja tasa histórica de éxito")
+                penalties.append(10.0)
 
-            if sell_tax >= 15:
-                risk_score += 25
-                risk_flags.append("sell_tax_high")
-            elif sell_tax >= 8:
-                risk_score += 12
-                risk_flags.append("sell_tax_elevated")
+            # 5) Concentration / clustering
+            if top_holder_ratio >= 0.50:
+                reasons.append("Top holder concentration extrema")
+                penalties.append(25.0)
+            elif top_holder_ratio >= 0.25:
+                warnings.append("Top holder concentration alta")
+                penalties.append(12.0)
 
-            if liquidity_usd < 2000:
-                risk_score += 10
-                risk_flags.append("liquidity_thin")
+            if holder_concentration >= 0.80:
+                reasons.append("Holder concentration extrema")
+                penalties.append(20.0)
+            elif holder_concentration >= 0.60:
+                warnings.append("Holder concentration elevada")
+                penalties.append(10.0)
 
-            if volume_5m <= 0:
-                risk_score += 8
-                risk_flags.append("no_recent_volume")
+            if wallet_cluster_score >= 0.80:
+                reasons.append("Wallet clustering sospechoso")
+                penalties.append(15.0)
+            elif wallet_cluster_score >= 0.60:
+                warnings.append("Posible clustering de wallets")
+                penalties.append(8.0)
 
-            social_count = sum([has_website, has_twitter, has_telegram])
-            if social_count == 0:
-                risk_score += 8
-                risk_flags.append("no_social_presence")
+            risk_score = min(round(sum(penalties), 2), 100.0)
 
-            if metadata_score > 0 and metadata_score < 35:
-                risk_score += 8
-                risk_flags.append("weak_metadata_quality")
+            if risk_score >= 70:
+                risk_level = "critical"
+            elif risk_score >= 45:
+                risk_level = "high"
+            elif risk_score >= 25:
+                risk_level = "medium"
+            else:
+                risk_level = "low"
 
-            honeypot_risk = min(100.0, float(risk_score))
+            is_suspicious = risk_score >= 45 or len(reasons) >= 2
 
-            is_high_risk = honeypot_risk >= 60
-            is_medium_risk = 35 <= honeypot_risk < 60
+            if is_suspicious:
+                self.suspicious_count += 1
 
             result = {
-                "honeypot_risk_score": honeypot_risk,
-                "honeypot_risk_level": self._classify_risk(honeypot_risk),
-                "honeypot_flags": risk_flags,
-                "is_honeypot_high_risk": is_high_risk,
-                "is_honeypot_medium_risk": is_medium_risk,
-                "honeypot_summary": self._build_summary(honeypot_risk, risk_flags),
+                "is_suspicious": is_suspicious,
+                "risk_level": risk_level,
+                "risk_score": risk_score,
+                "score_penalty": risk_score,
+                "reasons": reasons,
+                "warnings": warnings,
+                "checks": {
+                    "freeze_authority_active": bool(freeze_authority),
+                    "mint_authority_active": bool(mint_authority),
+                    "owner_renounced": owner_renounced,
+                    "metadata_score": metadata_score,
+                    "metadata_flag_count": len(metadata_flags),
+                    "creator_tokens_created": creator_tokens_created,
+                    "creator_failure_rate": creator_failure_rate,
+                    "creator_success_rate": creator_success_rate,
+                    "top_holder_ratio": top_holder_ratio,
+                    "holder_concentration": holder_concentration,
+                    "wallet_cluster_score": wallet_cluster_score,
+                },
             }
 
             logger.debug(
-                f"Honeypot analysis complete | risk={honeypot_risk} | flags={risk_flags}"
+                f"Honeypot analysis completed | suspicious={is_suspicious} "
+                f"| risk_score={risk_score}"
             )
             return result
 
         except Exception as e:
-            logger.error(f"Honeypot analysis failed: {e}")
+            logger.error(f"Error analyzing honeypot risk: {e}")
             return {
-                "honeypot_risk_score": 100.0,
-                "honeypot_risk_level": "UNKNOWN",
-                "honeypot_flags": ["honeypot_analysis_error"],
-                "is_honeypot_high_risk": True,
-                "is_honeypot_medium_risk": False,
-                "honeypot_summary": "honeypot analysis failed",
+                "is_suspicious": True,
+                "risk_level": "critical",
+                "risk_score": 100.0,
+                "score_penalty": 100.0,
+                "reasons": [f"Detector error: {e}"],
+                "warnings": [],
+                "checks": {},
             }
 
-    def _classify_risk(self, risk_score: float) -> str:
-        if risk_score >= 60:
-            return "HIGH"
-        if risk_score >= 35:
-            return "MEDIUM"
-        return "LOW"
-
-    def _build_summary(self, risk_score: float, flags: List[str]) -> str:
-        if not flags:
-            return f"honeypot_risk={int(risk_score)} | no major flags"
-        return f"honeypot_risk={int(risk_score)} | flags={','.join(flags[:4])}"
-
-    def _as_bool(self, value: Any) -> bool:
-        if isinstance(value, bool):
-            return value
-        if value is None:
-            return False
-        if isinstance(value, (int, float)):
-            return value != 0
-        if isinstance(value, str):
-            return value.strip().lower() in {"1", "true", "yes", "y", "enabled"}
-        return bool(value)
-
-    def _as_int(self, value: Any) -> int:
-        try:
-            return int(value or 0)
-        except Exception:
-            return 0
-
-    def _as_float(self, value: Any) -> float:
-        try:
-            return float(value or 0.0)
-        except Exception:
-            return 0.0
+    def get_stats(self) -> dict:
+        total = self.analyzed_count
+        return {
+            "analyzed_count": total,
+            "suspicious_count": self.suspicious_count,
+            "suspicious_rate": self.suspicious_count / total if total > 0 else 0,
+        }
