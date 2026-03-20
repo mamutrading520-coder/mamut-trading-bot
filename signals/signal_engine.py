@@ -225,6 +225,8 @@ class SignalEngine:
         except Exception as e:
             logger.error(f"Error in generate_confirmed_and_emit: {e}")
             return False
+            
+import json
 
     def _persist_signal(
         self,
