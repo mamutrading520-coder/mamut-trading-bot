@@ -1,202 +1,159 @@
-﻿"""Comprehensive score calculation engine"""
-from typing import Dict, Any, Optional
+"""Score engine for passed tokens"""
+
+from __future__ import annotations
+
+from typing import Dict, Any
 from datetime import datetime
+
 from monitoring.logger import setup_logger
 from core.event_bus import Event, get_event_bus
-from config.thresholds import (
-    FLOW_ANALYSIS_THRESHOLDS,
-    HOLDER_QUALITY_THRESHOLDS,
-)
-from scoring.score_weights import (
-    SCORE_WEIGHTS,
-    combine_scores,
-    get_risk_level,
-    get_confidence,
-)
 
 logger = setup_logger("ScoreEngine")
 
+
 class ScoreEngine:
-    """Calculates comprehensive risk and quality scores"""
+    """Computes final token score after trash filtering."""
 
     def __init__(self):
         self.event_bus = get_event_bus()
         self.scored_count = 0
         self.failed_count = 0
 
-    def _calculate_flow_score(self, token_data: Dict[str, Any]) -> float:
-        """Calculate flow quality score"""
+    def _safe_float(self, value: Any, default: float = 0.0) -> float:
         try:
-            initial_buy = token_data.get("initial_buy", 0)
-            initial_sol = token_data.get("initial_sol", 0)
-            v_tokens_in_bonding = token_data.get("v_tokens_in_bonding_curve", 0)
-            v_sol_in_bonding = token_data.get("v_sol_in_bonding_curve", 0)
+            if value is None:
+                return default
+            return float(value)
+        except (TypeError, ValueError):
+            return default
 
-            # Start lower to force tokens to earn higher scores
-            score = 30.0
-
-            min_initial_sol = FLOW_ANALYSIS_THRESHOLDS.get("min_volume_threshold", 0.5)
-            min_initial_buyers = FLOW_ANALYSIS_THRESHOLDS.get("min_initial_buyers", 5)
-
-            # initial_sol contribution - proportional scoring for wider differentiation
-            if initial_sol < 0.01:
-                # Very low initial liquidity: aggressive penalty
-                score -= 10.0
-            elif initial_sol >= min_initial_sol:
-                # Above threshold: scale bonus with sol amount (base 20, up to 30, +5 per extra threshold)
-                sol_ratio = initial_sol / min_initial_sol
-                score += min(30.0, 20.0 + (sol_ratio - 1.0) * 5.0)
-            else:
-                # Partial credit proportional to threshold proximity
-                score += (initial_sol / min_initial_sol) * 20.0
-
-            # initial_buy multiplier - ratio-based for better differentiation
-            if initial_buy >= min_initial_buyers:
-                # Above threshold: scale bonus with buy count (base 15, up to 20, +2 per extra threshold)
-                buy_ratio = initial_buy / min_initial_buyers
-                score += min(20.0, 15.0 + (buy_ratio - 1.0) * 2.0)
-            elif initial_buy > 0:
-                # Partial credit proportional to threshold proximity
-                score += (initial_buy / min_initial_buyers) * 10.0
-
-            # Bonding curve ratio bonus
-            if v_tokens_in_bonding > 0 and v_sol_in_bonding > 0:
-                curve_ratio = v_sol_in_bonding / v_tokens_in_bonding
-                if 0.000001 <= curve_ratio <= 0.01:
-                    score += 10.0
-
-            return max(0.0, min(100.0, score))
-
-        except Exception as e:
-            logger.debug(f"Error calculating flow score: {e}")
-            return 50.0
-
-    def _calculate_holder_quality_score(self, token_data: Dict[str, Any]) -> float:
-        """Calculate buyer/holder quality score"""
-        try:
-            score = 60.0
-
-            concentration_analysis = token_data.get("concentration_analysis", {})
-            holder_count = concentration_analysis.get("total_holders", 0)
-
-            min_holders = HOLDER_QUALITY_THRESHOLDS.get("min_unique_buyers", 10)
-
-            if holder_count >= min_holders * 2:
-                score += 20.0
-            elif holder_count >= min_holders:
-                score += 10.0
-            elif holder_count > 0:
-                score -= 10.0
-
-            return max(0.0, min(100.0, score))
-
-        except Exception as e:
-            logger.debug(f"Error calculating holder quality: {e}")
-            return 60.0
-
-    def _extract_risk_scores(self, filter_results: Dict[str, Any]) -> Dict[str, float]:
-        """Extract individual risk scores from filter results.
-
-        Checks the new format first (direct top-level keys emitted by
-        TrashFilterEngine in the TokenPassed event), then falls back to the
-        legacy nested ``checks`` dictionary for backward compatibility.
-        Each score is resolved independently so mixed formats are handled
-        gracefully.
+    def _compute_quality_score(self, token_data: Dict[str, Any]) -> Dict[str, Any]:
         """
-        checks = filter_results.get("checks", {})
+        Build final score from residual quality and risk.
+        Returns:
+        - final_score: 0..100
+        - confidence: 0..1
+        - breakdown
+        """
+        market_cap_sol = self._safe_float(token_data.get("market_cap_sol", 0))
+        metadata_score = self._safe_float(token_data.get("metadata_score", 0))
+        social_count = int(token_data.get("social_count", 0) or 0)
 
-        def _get(new_key: str, legacy_key: str, default: float = 50.0) -> float:
-            if new_key in filter_results:
-                return float(filter_results[new_key])
-            return checks.get(legacy_key, {}).get("score", default)
+        aggregate_risk = self._safe_float(token_data.get("aggregate_risk_score", 50))
+        authority_risk = self._safe_float(token_data.get("authority_risk", 50))
+        creator_risk = self._safe_float(token_data.get("creator_risk", 50))
+        concentration_risk = self._safe_float(token_data.get("concentration_risk", 50))
+        metadata_risk = self._safe_float(token_data.get("metadata_risk", 50))
+        honeypot_risk = self._safe_float(token_data.get("honeypot_risk", 50))
+
+        score = 50.0
+        notes = []
+
+        # Metadata quality
+        if metadata_score >= 80:
+            score += 12
+            notes.append("Strong metadata quality")
+        elif metadata_score >= 60:
+            score += 8
+            notes.append("Good metadata quality")
+        elif metadata_score >= 40:
+            score += 4
+        else:
+            score -= 6
+            notes.append("Weak metadata quality")
+
+        # Social presence
+        if social_count >= 3:
+            score += 8
+            notes.append("Strong social presence")
+        elif social_count == 2:
+            score += 5
+        elif social_count == 1:
+            score += 2
+        else:
+            score -= 4
+            notes.append("No socials detected")
+
+        # Market cap sanity for early tokens
+        if 20 <= market_cap_sol <= 250:
+            score += 8
+            notes.append("Healthy early market cap range")
+        elif 10 <= market_cap_sol < 20:
+            score += 4
+        elif market_cap_sol > 500:
+            score -= 4
+            notes.append("Late/extended market cap profile")
+
+        # Residual risks
+        score -= aggregate_risk * 0.20
+        score -= authority_risk * 0.08
+        score -= creator_risk * 0.08
+        score -= concentration_risk * 0.06
+        score -= metadata_risk * 0.05
+        score -= honeypot_risk * 0.10
+
+        final_score = round(max(0.0, min(100.0, score)), 2)
+
+        # Confidence reflects both score and risk cleanliness
+        cleanliness = max(0.0, 100.0 - aggregate_risk)
+        confidence = ((final_score * 0.6) + (cleanliness * 0.4)) / 100.0
+        confidence = round(max(0.0, min(0.99, confidence)), 4)
 
         return {
-            "authority": _get("authority_risk", "authority"),
-            "creator": _get("creator_risk", "creator_risk"),
-            "concentration": _get("concentration_risk", "concentration"),
+            "final_score": final_score,
+            "confidence": confidence,
+            "breakdown": {
+                "market_cap_sol": market_cap_sol,
+                "metadata_score": metadata_score,
+                "social_count": social_count,
+                "aggregate_risk": aggregate_risk,
+                "authority_risk": authority_risk,
+                "creator_risk": creator_risk,
+                "concentration_risk": concentration_risk,
+                "metadata_risk": metadata_risk,
+                "honeypot_risk": honeypot_risk,
+                "notes": notes,
+            },
         }
 
-    def calculate_score(
-        self,
-        token_data: Dict[str, Any],
-        filter_results: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """Calculate comprehensive token score"""
-        try:
-            mint = token_data.get("mint")
-            symbol = token_data.get("symbol", "UNKNOWN")
-
-            risk_scores = self._extract_risk_scores(filter_results)
-            flow_score = self._calculate_flow_score(token_data)
-            holder_quality = self._calculate_holder_quality_score(token_data)
-
-            final_score = combine_scores(
-                authority_risk=risk_scores["authority"],
-                creator_risk=risk_scores["creator"],
-                holder_quality=holder_quality,
-                concentration=risk_scores["concentration"],
-                flow_score=flow_score,
-            )
-
-            risk_level = get_risk_level(final_score)
-            confidence = get_confidence(final_score)
-
-            analysis = {
-                "mint": mint,
-                "symbol": symbol,
-                "final_score": final_score,
-                "confidence": confidence,
-                "risk_level": risk_level,
-                "component_scores": {
-                    "authority_risk": risk_scores["authority"],
-                    "creator_risk": risk_scores["creator"],
-                    "concentration": risk_scores["concentration"],
-                    "flow": flow_score,
-                    "holder_quality": holder_quality,
-                },
-                "weights": SCORE_WEIGHTS,
-                "timestamp": datetime.utcnow().isoformat(),
-            }
-
-            self.scored_count += 1
-            logger.debug(f"Scored {mint[:8]}...: {final_score:.1f} ({risk_level})")
-
-            return analysis
-
-        except Exception as e:
-            logger.error(f"Error calculating score: {e}")
-            self.failed_count += 1
-            return {
-                "mint": token_data.get("mint"),
-                "error": str(e),
-                "final_score": 0.0,
-            }
-
     async def score_and_emit(self, event: Event) -> bool:
-        """Score token and emit ScoreCalculated event"""
+        """Score token and emit ScoreCalculated."""
         try:
-            score_analysis = self.calculate_score(event.data, event.data)
-
-            if "error" in score_analysis:
+            token_data = event.data or {}
+            mint = token_data.get("mint")
+            if not mint:
+                logger.warning("score_and_emit called without mint")
                 return False
+
+            result = self._compute_quality_score(token_data)
 
             score_event = Event(
                 event_type="ScoreCalculated",
-                data=score_analysis,
+                data={
+                    **token_data,
+                    "final_score": result["final_score"],
+                    "confidence": result["confidence"],
+                    "score_breakdown": result["breakdown"],
+                },
                 source="ScoreEngine",
-                timestamp=datetime.utcnow()
+                timestamp=datetime.utcnow(),
             )
 
             await self.event_bus.emit(score_event)
+
+            self.scored_count += 1
+            logger.info(
+                f"ScoreCalculated: {mint[:8]}... | "
+                f"score={result['final_score']:.2f} | conf={result['confidence']:.2f}"
+            )
             return True
 
         except Exception as e:
-            logger.error(f"Error in score_and_emit: {e}")
+            logger.error(f"Error scoring token: {e}")
             self.failed_count += 1
             return False
 
-    def get_stats(self) -> dict:
-        """Get score engine statistics"""
+    def get_stats(self) -> Dict[str, Any]:
         total = self.scored_count + self.failed_count
         return {
             "scored_count": self.scored_count,
