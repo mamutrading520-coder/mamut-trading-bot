@@ -1,5 +1,4 @@
 """SQLite database operations for Mamut"""
-
 from __future__ import annotations
 
 import json
@@ -72,7 +71,6 @@ class SQLiteStore:
     # -------------------------------------------------------------------------
     # TOKEN OPERATIONS
     # -------------------------------------------------------------------------
-
     def create_token(self, token_data: Dict[str, Any]) -> Token:
         """Create token record."""
         session = self._get_session()
@@ -119,9 +117,18 @@ class SQLiteStore:
             if not token:
                 return None
 
+            ignored_fields: List[str] = []
+
             for key, value in updates.items():
                 if hasattr(token, key):
                     setattr(token, key, value)
+                else:
+                    ignored_fields.append(key)
+
+            if ignored_fields:
+                logger.warning(
+                    f"Ignored unknown Token fields for {mint[:8]}...: {', '.join(sorted(ignored_fields))}"
+                )
 
             token.updated_at = datetime.utcnow()
             session.commit()
@@ -140,8 +147,10 @@ class SQLiteStore:
         """
         mint = token_data["mint"]
         session = self._get_session()
+
         try:
             token = session.query(Token).filter(Token.mint == mint).first()
+
             if not token:
                 token = Token(**token_data)
                 session.add(token)
@@ -154,6 +163,7 @@ class SQLiteStore:
             session.commit()
             session.refresh(token)
             return token
+
         except Exception as e:
             session.rollback()
             logger.error(f"Error upserting base token {mint}: {e}")
@@ -178,7 +188,11 @@ class SQLiteStore:
             "creator_balance": enriched_data.get("creator_balance"),
             "market_cap_sol": enriched_data.get("market_cap_sol"),
             "metadata_retrieved": bool(enriched_data.get("metadata_retrieved", False)),
-            "metadata_json": self._json(enriched_data.get("uri_metadata")),
+            "metadata_json": self._json(
+                enriched_data.get("metadata_json")
+                or enriched_data.get("uri_metadata")
+                or enriched_data.get("metadata")
+            ),
         }
         updates = {k: v for k, v in updates.items() if v is not None}
         return self.update_token(mint, updates)
@@ -189,8 +203,8 @@ class SQLiteStore:
         """
         updates = {
             "passed_filters": filter_data.get("passed_filters", True),
-            "risk_level": filter_data.get("aggregate_risk_level"),
-            "risk_score": filter_data.get("aggregate_risk_score"),
+            "risk_level": filter_data.get("aggregate_risk_level") or filter_data.get("risk_level"),
+            "risk_score": filter_data.get("aggregate_risk_score") or filter_data.get("risk_score"),
             "rejection_reason": filter_data.get("rejection_reason") or filter_data.get("reason"),
         }
         updates = {k: v for k, v in updates.items() if v is not None}
@@ -200,9 +214,16 @@ class SQLiteStore:
         """
         Persist score-stage summary on Token.
         """
+        breakdown = score_data.get("score_breakdown") or {}
+
         updates = {
-            "score": score_data.get("final_score"),
+            "final_score": score_data.get("final_score"),
             "confidence": score_data.get("confidence"),
+            "risk_level": score_data.get("aggregate_risk_level") or score_data.get("risk_level"),
+            "authority_risk": breakdown.get("authority_risk"),
+            "creator_risk": breakdown.get("creator_risk"),
+            "concentration_risk": breakdown.get("concentration_risk"),
+            "flow_score": breakdown.get("flow_score"),
         }
         updates = {k: v for k, v in updates.items() if v is not None}
         return self.update_token(mint, updates)
@@ -212,12 +233,26 @@ class SQLiteStore:
         Persist Raydium/market confirmation fields on Token.
         """
         pool = raydium_data.get("pool", {}) or {}
+
+        liquidity_sol = (
+            raydium_data.get("liquidity_sol")
+            if raydium_data.get("liquidity_sol") is not None
+            else pool.get("liquidity_sol")
+        )
+        if liquidity_sol is None:
+            liquidity_sol = raydium_data.get("raydium_liquidity_sol")
+
         updates = {
+            "raydium_pool_found": bool(
+                pool.get("pool_id")
+                or pool.get("id")
+                or raydium_data.get("pool_id")
+                or raydium_data.get("raydium_pool_id")
+            ),
             "raydium_pool_id": pool.get("pool_id") or pool.get("id") or raydium_data.get("pool_id"),
-            "raydium_liquidity_sol": raydium_data.get("liquidity_sol")
-            or pool.get("liquidity_sol")
-            or raydium_data.get("raydium_liquidity_sol"),
+            "raydium_liquidity_sol": liquidity_sol,
             "validation_score": raydium_data.get("validation_score"),
+            "market_cap_sol": raydium_data.get("market_cap_sol"),
         }
         updates = {k: v for k, v in updates.items() if v is not None}
         return self.update_token(mint, updates)
@@ -225,7 +260,6 @@ class SQLiteStore:
     # -------------------------------------------------------------------------
     # SCORE OPERATIONS
     # -------------------------------------------------------------------------
-
     def create_score(self, score_data: Dict[str, Any]) -> TokenScore:
         """Create score record."""
         session = self._get_session()
@@ -262,19 +296,26 @@ class SQLiteStore:
         """
         Persist a normalized score-analysis record.
         """
+        breakdown = score_data.get("score_breakdown") or {}
+
         payload = {
             "mint": mint,
             "final_score": score_data.get("final_score"),
             "confidence": score_data.get("confidence"),
             "risk_level": score_data.get("aggregate_risk_level") or score_data.get("risk_level"),
-            "market_cap_score": (score_data.get("score_breakdown") or {}).get("market_cap_sol"),
-            "creator_score": (score_data.get("score_breakdown") or {}).get("creator_risk"),
-            "authority_score": (score_data.get("score_breakdown") or {}).get("authority_risk"),
-            "concentration_score": (score_data.get("score_breakdown") or {}).get("concentration_risk"),
-            "metadata_score": (score_data.get("score_breakdown") or {}).get("metadata_score"),
-            "bonus_points": None,
-            "penalty_points": None,
-            "score_breakdown_json": self._json(score_data.get("score_breakdown")),
+            "market_cap_score": breakdown.get("market_cap_score")
+            if breakdown.get("market_cap_score") is not None
+            else breakdown.get("market_cap_sol"),
+            "creator_risk": breakdown.get("creator_risk"),
+            "authority_risk": breakdown.get("authority_risk"),
+            "concentration_risk": breakdown.get("concentration_risk"),
+            "flow_score": breakdown.get("flow_score"),
+            "holder_quality": breakdown.get("holder_quality"),
+            "metadata_score": breakdown.get("metadata_score"),
+            "bonus_points": breakdown.get("bonus_points"),
+            "penalty_points": breakdown.get("penalty_points"),
+            "score_breakdown_json": self._json(breakdown),
+            "decision": score_data.get("decision"),
         }
         payload = {k: v for k, v in payload.items() if v is not None}
         return self.create_score(payload)
@@ -282,7 +323,6 @@ class SQLiteStore:
     # -------------------------------------------------------------------------
     # SIGNAL OPERATIONS
     # -------------------------------------------------------------------------
-
     def create_signal(self, signal_data: Dict[str, Any]) -> Signal:
         """Create signal record."""
         session = self._get_session()
@@ -306,11 +346,9 @@ class SQLiteStore:
             signal = session.query(Signal).filter(Signal.signal_id == signal_id).first()
             if not signal:
                 return None
-
             for key, value in updates.items():
                 if hasattr(signal, key):
                     setattr(signal, key, value)
-
             signal.updated_at = datetime.utcnow()
             session.commit()
             session.refresh(signal)
@@ -370,7 +408,6 @@ class SQLiteStore:
     # -------------------------------------------------------------------------
     # CREATOR OPERATIONS
     # -------------------------------------------------------------------------
-
     def create_creator_profile(self, creator_data: Dict[str, Any]) -> CreatorProfile:
         """Create creator profile."""
         session = self._get_session()
@@ -413,11 +450,9 @@ class SQLiteStore:
             )
             if not profile:
                 return None
-
             for key, value in updates.items():
                 if hasattr(profile, key):
                     setattr(profile, key, value)
-
             profile.updated_at = datetime.utcnow()
             session.commit()
             session.refresh(profile)
@@ -432,7 +467,6 @@ class SQLiteStore:
     # -------------------------------------------------------------------------
     # AUDIT OPERATIONS
     # -------------------------------------------------------------------------
-
     def log_audit(
         self,
         action: str,
@@ -457,7 +491,6 @@ class SQLiteStore:
     # -------------------------------------------------------------------------
     # SIGNAL HISTORY OPERATIONS
     # -------------------------------------------------------------------------
-
     def create_signal_history(
         self,
         signal_id: str,
@@ -524,7 +557,6 @@ class SQLiteStore:
     # -------------------------------------------------------------------------
     # TOKEN LIFECYCLE OPERATIONS
     # -------------------------------------------------------------------------
-
     def update_token_lifecycle(
         self,
         mint: str,
@@ -544,11 +576,6 @@ class SQLiteStore:
             if token:
                 token.lifecycle_status = status
                 token.updated_at = datetime.utcnow()
-            else:
-                logger.warning(
-                    f"update_token_lifecycle: token '{mint}' not found; "
-                    "recording lifecycle event without updating token record"
-                )
 
             entry = TokenLifecycle(
                 mint=mint,
@@ -570,7 +597,7 @@ class SQLiteStore:
             session.close()
 
     def get_token_lifecycle(self, mint: str) -> List[TokenLifecycle]:
-        """Get the full lifecycle timeline for a token."""
+        """Get token lifecycle history."""
         session = self._get_session()
         try:
             return (
@@ -585,27 +612,10 @@ class SQLiteStore:
         finally:
             session.close()
 
-    def get_tokens_by_status(self, status: str) -> List[Token]:
-        """Get all tokens currently at a given lifecycle status."""
-        session = self._get_session()
-        try:
-            return (
-                session.query(Token)
-                .filter(Token.lifecycle_status == status)
-                .order_by(Token.created_at.desc())
-                .all()
-            )
-        except Exception as e:
-            logger.error(f"Error getting tokens by status: {e}")
-            return []
-        finally:
-            session.close()
-
     # -------------------------------------------------------------------------
     # PERFORMANCE METRICS OPERATIONS
     # -------------------------------------------------------------------------
-
-    def record_performance_metric(
+    def create_performance_metric(
         self,
         operation: str,
         duration_ms: float,
@@ -613,9 +623,9 @@ class SQLiteStore:
         signal_id: Optional[str] = None,
         success: bool = True,
         error_message: Optional[str] = None,
-        metadata_json: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> PerformanceMetrics:
-        """Record a performance metric for an operation."""
+        """Persist a performance metric."""
         session = self._get_session()
         try:
             metric = PerformanceMetrics(
@@ -625,7 +635,7 @@ class SQLiteStore:
                 duration_ms=duration_ms,
                 success=success,
                 error_message=error_message,
-                metadata_json=metadata_json,
+                metadata_json=self._json(metadata),
             )
             session.add(metric)
             session.commit()
@@ -633,122 +643,91 @@ class SQLiteStore:
             return metric
         except Exception as e:
             session.rollback()
-            logger.error(f"Error recording performance metric: {e}")
+            logger.error(f"Error creating performance metric: {e}")
             raise
-        finally:
-            session.close()
-
-    def get_performance_metrics(
-        self,
-        time_range: Optional[Tuple[datetime, datetime]] = None,
-        operation: Optional[str] = None,
-    ) -> List[PerformanceMetrics]:
-        """Get performance metrics, optionally filtered by time range and operation."""
-        session = self._get_session()
-        try:
-            q = session.query(PerformanceMetrics)
-            if time_range:
-                start, end = time_range
-                q = q.filter(
-                    and_(
-                        PerformanceMetrics.created_at >= start,
-                        PerformanceMetrics.created_at <= end,
-                    )
-                )
-            if operation:
-                q = q.filter(PerformanceMetrics.operation == operation)
-
-            return q.order_by(PerformanceMetrics.created_at.asc()).all()
-        except Exception as e:
-            logger.error(f"Error getting performance metrics: {e}")
-            return []
-        finally:
-            session.close()
-
-    def get_slow_signals(self, threshold_ms: float = 1000.0) -> List[PerformanceMetrics]:
-        """Identify slow signal processing operations."""
-        session = self._get_session()
-        try:
-            return (
-                session.query(PerformanceMetrics)
-                .filter(
-                    and_(
-                        PerformanceMetrics.operation.like("%signal%"),
-                        PerformanceMetrics.duration_ms >= threshold_ms,
-                    )
-                )
-                .order_by(PerformanceMetrics.duration_ms.desc())
-                .all()
-            )
-        except Exception as e:
-            logger.error(f"Error getting slow signals: {e}")
-            return []
         finally:
             session.close()
 
     # -------------------------------------------------------------------------
     # SIGNAL OUTCOME OPERATIONS
     # -------------------------------------------------------------------------
-
-    def create_signal_outcome(self, outcome_data: Dict[str, Any]) -> SignalOutcome:
-        """Create signal outcome record."""
+    def create_or_update_signal_outcome(
+        self,
+        signal_id: str,
+        mint: str,
+        creator: Optional[str] = None,
+        outcome_data: Optional[Dict[str, Any]] = None,
+    ) -> SignalOutcome:
+        """Create or update signal outcome."""
         session = self._get_session()
         try:
-            outcome = SignalOutcome(**outcome_data)
-            session.add(outcome)
+            outcome = (
+                session.query(SignalOutcome)
+                .filter(SignalOutcome.signal_id == signal_id)
+                .first()
+            )
+
+            payload = outcome_data or {}
+
+            if not outcome:
+                outcome = SignalOutcome(
+                    signal_id=signal_id,
+                    mint=mint,
+                    creator=creator,
+                )
+                session.add(outcome)
+
+            for key, value in {
+                "creator": creator,
+                "outcome": payload.get("outcome"),
+                "entry_price_sol": payload.get("entry_price_sol"),
+                "exit_price_sol": payload.get("exit_price_sol"),
+                "peak_price_sol": payload.get("peak_price_sol"),
+                "return_pct": payload.get("return_pct"),
+                "hold_duration_minutes": payload.get("hold_duration_minutes"),
+                "notes": payload.get("notes"),
+                "metadata_json": self._json(payload.get("metadata")),
+            }.items():
+                if value is not None and hasattr(outcome, key):
+                    setattr(outcome, key, value)
+
+            outcome.updated_at = datetime.utcnow()
             session.commit()
             session.refresh(outcome)
             return outcome
         except Exception as e:
             session.rollback()
-            logger.error(f"Error creating signal outcome: {e}")
+            logger.error(f"Error creating/updating signal outcome: {e}")
             raise
-        finally:
-            session.close()
-
-    def get_signal_outcomes(
-        self,
-        date_range: Optional[Tuple[datetime, datetime]] = None,
-    ) -> List[SignalOutcome]:
-        """Get signal outcomes for performance analysis."""
-        session = self._get_session()
-        try:
-            q = session.query(SignalOutcome)
-            if date_range:
-                start, end = date_range
-                q = q.filter(
-                    and_(
-                        SignalOutcome.created_at >= start,
-                        SignalOutcome.created_at <= end,
-                    )
-                )
-
-            return q.order_by(SignalOutcome.created_at.desc()).all()
-        except Exception as e:
-            logger.error(f"Error getting signal outcomes: {e}")
-            return []
-        finally:
-            session.close()
-
-    def get_creator_signal_performance(self, creator: str) -> List[SignalOutcome]:
-        """Get signal outcomes for a specific creator."""
-        session = self._get_session()
-        try:
-            return (
-                session.query(SignalOutcome)
-                .filter(SignalOutcome.creator == creator)
-                .order_by(SignalOutcome.created_at.desc())
-                .all()
-            )
-        except Exception as e:
-            logger.error(f"Error getting creator signal performance: {e}")
-            return []
         finally:
             session.close()
 
     # -------------------------------------------------------------------------
     # SYSTEM STATE OPERATIONS
     # -------------------------------------------------------------------------
+    def set_system_state(self, key: str, value: Any) -> SystemState:
+        """Set system state key/value."""
+        session = self._get_session()
+        try:
+            state = session.query(SystemState).filter(SystemState.key == key).first()
+            serialized = value if isinstance(value, str) else self._json(value)
+
+            if not state:
+                state = SystemState(key=key, value=serialized)
+                session.add(state)
+            else:
+                state.value = serialized
+                state.updated_at = datetime.utcnow()
+
+            session.commit()
+            session.refresh(state)
+            return state
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Error setting system state: {e}")
+            raise
+        finally:
+            session.close()
 
     def get_system_state(self, key: str) -> Optional[SystemState]:
         """Get system state by key."""
@@ -756,150 +735,76 @@ class SQLiteStore:
         try:
             return session.query(SystemState).filter(SystemState.key == key).first()
         except Exception as e:
-            logger.error(f"Error getting system state '{key}': {e}")
+            logger.error(f"Error getting system state: {e}")
             return None
         finally:
             session.close()
 
-    def set_system_state(self, key: str, value: str) -> SystemState:
-        """Upsert a system state key/value pair."""
+    # -------------------------------------------------------------------------
+    # ANALYTICS / QUERIES
+    # -------------------------------------------------------------------------
+    def get_recent_signals(self, limit: int = 50) -> List[Signal]:
+        """Get most recent signals."""
         session = self._get_session()
         try:
-            row = session.query(SystemState).filter(SystemState.key == key).first()
-            if row:
-                row.value = value
-                row.updated_at = datetime.utcnow()
-            else:
-                row = SystemState(key=key, value=value)
-                session.add(row)
-
-            session.commit()
-            session.refresh(row)
-            return row
-        except Exception as e:
-            session.rollback()
-            logger.error(f"Error setting system state '{key}': {e}")
-            raise
-        finally:
-            session.close()
-
-    # -------------------------------------------------------------------------
-    # STATISTICS
-    # -------------------------------------------------------------------------
-
-    def get_statistics(self) -> Dict[str, Any]:
-        """Get system statistics."""
-        session = self._get_session()
-        try:
-            total_tokens = session.query(func.count(Token.id)).scalar() or 0
-            total_signals = session.query(func.count(Signal.id)).scalar() or 0
-
-            risk_levels = (
-                session.query(Token.risk_level, func.count(Token.id))
-                .group_by(Token.risk_level)
+            return (
+                session.query(Signal)
+                .order_by(Signal.created_at.desc())
+                .limit(limit)
                 .all()
             )
-            tokens_by_risk = {level: count for level, count in risk_levels}
-
-            signal_types = (
-                session.query(Signal.signal_type, func.count(Signal.id))
-                .group_by(Signal.signal_type)
-                .all()
-            )
-            signals_by_type = {sig_type: count for sig_type, count in signal_types}
-
-            lifecycle = (
-                session.query(Token.lifecycle_status, func.count(Token.id))
-                .group_by(Token.lifecycle_status)
-                .all()
-            )
-            tokens_by_status = {status: count for status, count in lifecycle}
-
-            return {
-                "total_tokens": total_tokens,
-                "total_signals": total_signals,
-                "tokens_by_risk": tokens_by_risk,
-                "signals_by_type": signals_by_type,
-                "tokens_by_status": tokens_by_status,
-            }
         except Exception as e:
-            logger.error(f"Error getting statistics: {e}")
-            return {
-                "total_tokens": 0,
-                "total_signals": 0,
-                "tokens_by_risk": {},
-                "signals_by_type": {},
-                "tokens_by_status": {},
-            }
+            logger.error(f"Error getting recent signals: {e}")
+            return []
         finally:
             session.close()
 
-    # -------------------------------------------------------------------------
-    # DATA RETENTION
-    # -------------------------------------------------------------------------
-
-    def cleanup_old_records(self, days: int = 90) -> Dict[str, int]:
-        """Delete records older than the specified number of days."""
-        cutoff = datetime.utcnow() - timedelta(days=days)
-        deleted: Dict[str, int] = {}
-
+    def get_recent_tokens(self, limit: int = 50) -> List[Token]:
+        """Get most recent tokens."""
         session = self._get_session()
         try:
-            for model, label in [
-                (AuditLog, "audit_logs"),
-                (SignalHistory, "signal_history"),
-                (TokenLifecycle, "token_lifecycle"),
-                (PerformanceMetrics, "performance_metrics"),
-            ]:
-                count = (
-                    session.query(model)
-                    .filter(model.created_at < cutoff)
-                    .delete(synchronize_session=False)
-                )
-                deleted[label] = count
-
-            session.commit()
-            logger.info(f"Cleaned up records older than {days} days: {deleted}")
-            return deleted
+            return (
+                session.query(Token)
+                .order_by(Token.created_at.desc())
+                .limit(limit)
+                .all()
+            )
         except Exception as e:
-            session.rollback()
-            logger.error(f"Error during cleanup_old_records: {e}")
-            raise
+            logger.error(f"Error getting recent tokens: {e}")
+            return []
         finally:
             session.close()
 
-    def archive_old_data(self, before_date: datetime) -> Dict[str, int]:
-        """Delete archival data before a given date."""
-        archived: Dict[str, int] = {}
-
+    def get_tokens_created_since(self, minutes: int) -> List[Token]:
+        """Get tokens created within the last N minutes."""
         session = self._get_session()
         try:
-            for model, label in [
-                (SignalOutcome, "signal_outcomes"),
-                (TokenLifecycle, "token_lifecycle"),
-                (SignalHistory, "signal_history"),
-            ]:
-                count = (
-                    session.query(model)
-                    .filter(model.created_at < before_date)
-                    .delete(synchronize_session=False)
-                )
-                archived[label] = count
-
-            session.commit()
-            logger.info(f"Archived data before {before_date}: {archived}")
-            return archived
+            threshold = datetime.utcnow() - timedelta(minutes=minutes)
+            return (
+                session.query(Token)
+                .filter(Token.created_at >= threshold)
+                .order_by(Token.created_at.desc())
+                .all()
+            )
         except Exception as e:
-            session.rollback()
-            logger.error(f"Error during archive_old_data: {e}")
-            raise
+            logger.error(f"Error getting tokens created since: {e}")
+            return []
         finally:
             session.close()
 
-    def cleanup(self) -> None:
-        """Cleanup database resources."""
+    def get_signal_count_since(self, minutes: int) -> int:
+        """Count signals created within the last N minutes."""
+        session = self._get_session()
         try:
-            self.engine.dispose()
-            logger.info("Database cleanup complete")
+            threshold = datetime.utcnow() - timedelta(minutes=minutes)
+            return (
+                session.query(func.count(Signal.id))
+                .filter(Signal.created_at >= threshold)
+                .scalar()
+                or 0
+            )
         except Exception as e:
-            logger.error(f"Error during cleanup: {e}")
+            logger.error(f"Error counting recent signals: {e}")
+            return 0
+        finally:
+            session.close()
