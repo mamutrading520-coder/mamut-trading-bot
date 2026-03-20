@@ -1,16 +1,51 @@
-from typing import Dict, Optional
+from __future__ import annotations
+
+import json
+from typing import Any, Dict, Optional
+
 from loguru import logger
 
 
 class StateManager:
     """
-    Tracks token processing state across the pipeline.
+    Centraliza el estado de procesamiento de cada token.
+
+    Responsabilidades:
+    - Mantener estado actual en memoria para acceso rápido.
+    - Persistir el token base si aún no existe.
+    - Persistir transiciones de lifecycle en la base de datos.
+    - Mantener métricas operativas simples del pipeline.
     """
+
+    VALID_STATES = {
+        "DISCOVERED",
+        "PARSED",
+        "ENRICHED",
+        "PROFILED",
+        "PASSED_FILTERS",
+        "FILTER_REJECTED",
+        "SCORED",
+        "DECISION_MADE",
+        "EARLY_SIGNAL_SENT",
+        "SIGNAL_GENERATED",
+        "ALERT_DISPATCHED",
+        "RAYDIUM_WATCH_STARTED",
+        "POOL_FOUND",
+        "POOL_VALIDATED",
+        "POOL_INVALID",
+        "MARKET_CONFIRMED",
+        "POOL_TIMEOUT",
+        "ABANDONED",
+        "FAILED",
+    }
 
     def __init__(self, store):
         self.store = store
         self.token_states: Dict[str, str] = {}
         self.early_signals_sent: int = 0
+        self.lifecycle_updates: int = 0
+        self.abandoned_tokens: int = 0
+        self.failed_updates: int = 0
 
     async def initialize_token(
         self,
@@ -19,166 +54,232 @@ class StateManager:
         symbol: Optional[str] = None,
     ) -> bool:
         """
-        Initialize token in state tracking and persistent storage.
+        Inicializa un token en memoria y en persistencia.
+        Si el token ya existe, no lo duplica.
         """
+        if not mint:
+            logger.error("initialize_token called without mint")
+            self.failed_updates += 1
+            return False
+
         try:
-            self.token_states[mint] = "DISCOVERED"
-
-            token_data = {
-                "mint": mint,
-                "name": name or "",
-                "symbol": symbol or "",
-            }
-
+            existing = None
             try:
                 existing = self.store.get_token(mint)
-            except Exception:
-                existing = None
+            except Exception as db_error:
+                logger.warning(f"Could not read token {mint[:8]}... from store: {db_error}")
 
             if not existing:
+                token_data = {
+                    "mint": mint,
+                    "name": name or "",
+                    "symbol": symbol or "",
+                    "lifecycle_status": "DISCOVERED",
+                }
                 try:
                     self.store.create_token(token_data)
                 except Exception as db_error:
-                    logger.warning(f"Could not create token {mint[:8]}...: {db_error}")
+                    logger.error(f"Could not create token {mint[:8]}...: {db_error}")
+                    self.failed_updates += 1
+                    return False
+
+            self.token_states[mint] = "DISCOVERED"
+            self._record_lifecycle(
+                mint=mint,
+                new_status="DISCOVERED",
+                event="TokenDiscovered",
+                reason=None,
+                details={"name": name or "", "symbol": symbol or ""},
+            )
 
             logger.debug(f"Token {mint[:8]}... initialized")
             return True
 
         except Exception as e:
             logger.error(f"Error initializing token {mint[:8]}...: {e}")
+            self.failed_updates += 1
             return False
 
-    async def set_state(self, mint: str, state: str) -> None:
+    async def update_token_state(
+        self,
+        mint: str,
+        state: str,
+        details: Optional[Dict[str, Any]] = None,
+        event: Optional[str] = None,
+        reason: Optional[str] = None,
+    ) -> bool:
         """
-        Set current token state.
+        Actualiza el estado actual del token en memoria y persistencia.
         """
-        try:
-            self.token_states[mint] = state
-            logger.debug(f"Token {mint[:8]}... state -> {state}")
-        except Exception as e:
-            logger.error(f"Error setting state for {mint[:8]}...: {e}")
-
-    async def update_token_state(self, mint: str, state: str) -> bool:
-        """
-        Update token state in memory.
-        """
-        try:
-            self.token_states[mint] = state
-            logger.debug(f"Token {mint[:8]}... updated state -> {state}")
-            return True
-        except Exception as e:
-            logger.error(f"Error updating state for {mint[:8]}...: {e}")
+        if not mint:
+            logger.error("update_token_state called without mint")
+            self.failed_updates += 1
             return False
 
-    async def get_state(self, mint: str) -> Optional[str]:
-        """
-        Get current token state.
-        """
-        return self.token_states.get(mint)
+        normalized_state = self._normalize_state(state)
+        old_state = self.token_states.get(mint)
 
-    async def mark_discovered(self, mint: str) -> bool:
-        """
-        Mark token as discovered.
-        """
         try:
-            self.token_states[mint] = "DISCOVERED"
-            logger.debug(f"Token {mint[:8]}... marked as DISCOVERED")
-            return True
-        except Exception as e:
-            logger.error(f"Error marking discovered: {e}")
-            return False
+            self.token_states[mint] = normalized_state
 
-    async def mark_enriched(self, mint: str) -> bool:
-        """
-        Mark token as enriched.
-        """
-        try:
-            self.token_states[mint] = "ENRICHED"
-            logger.debug(f"Token {mint[:8]}... marked as ENRICHED")
-            return True
-        except Exception as e:
-            logger.error(f"Error marking enriched: {e}")
-            return False
+            try:
+                self.store.update_token(
+                    mint,
+                    {
+                        "lifecycle_status": normalized_state,
+                    },
+                )
+            except Exception as db_error:
+                logger.warning(
+                    f"Could not update token lifecycle_status for {mint[:8]}...: {db_error}"
+                )
 
-    async def mark_filtered(self, mint: str, passed: bool) -> bool:
-        """
-        Mark token after filter stage.
-        """
-        try:
-            self.token_states[mint] = "FILTERED" if passed else "REJECTED"
+            self._record_lifecycle(
+                mint=mint,
+                new_status=normalized_state,
+                event=event,
+                reason=reason,
+                details=details,
+                old_status=old_state,
+            )
+
             logger.debug(
-                f"Token {mint[:8]}... marked as {'FILTERED' if passed else 'REJECTED'}"
+                f"Token {mint[:8]}... state -> {normalized_state}"
+                + (f" | reason={reason}" if reason else "")
             )
             return True
-        except Exception as e:
-            logger.error(f"Error marking filtered: {e}")
-            return False
 
-    async def mark_scored(self, mint: str) -> bool:
-        """
-        Mark token as scored.
-        """
-        try:
-            self.token_states[mint] = "SCORED"
-            logger.debug(f"Token {mint[:8]}... marked as SCORED")
-            return True
         except Exception as e:
-            logger.error(f"Error marking scored: {e}")
-            return False
-
-    async def mark_signaled(self, mint: str) -> bool:
-        """
-        Mark token as signaled.
-        """
-        try:
-            self.token_states[mint] = "SIGNALED"
-            logger.debug(f"Token {mint[:8]}... marked as SIGNALED")
-            return True
-        except Exception as e:
-            logger.error(f"Error marking signaled: {e}")
-            return False
-
-    async def mark_early_signal_sent(self, mint: str) -> bool:
-        """
-        Mark that an early signal alert was sent.
-        """
-        try:
-            self.token_states[mint] = "EARLY_SIGNAL_SENT"
-            self.early_signals_sent += 1
-            logger.debug(f"Token {mint[:8]}... marked as EARLY_SIGNAL_SENT")
-            return True
-        except Exception as e:
-            logger.error(f"Error marking early signal sent: {e}")
+            logger.error(f"Error updating state for {mint[:8]}...: {e}")
+            self.failed_updates += 1
             return False
 
     async def mark_abandoned(self, mint: str, reason: str) -> bool:
         """
-        Mark token as abandoned and persist rejection reason.
+        Marca un token como abandonado/rechazado y persiste la razón.
         """
+        if not mint:
+            logger.error("mark_abandoned called without mint")
+            self.failed_updates += 1
+            return False
+
         try:
             self.token_states[mint] = "ABANDONED"
 
-            self.store.update_token(
-                mint,
-                {
-                    "rejection_reason": reason,
-                    "passed_filters": False,
-                    "risk_level": "REJECTED",
-                },
+            try:
+                self.store.update_token(
+                    mint,
+                    {
+                        "rejection_reason": reason,
+                        "passed_filters": False,
+                        "risk_level": "REJECTED",
+                        "lifecycle_status": "ABANDONED",
+                    },
+                )
+            except Exception as db_error:
+                logger.warning(f"Could not persist abandoned state for {mint[:8]}...: {db_error}")
+
+            self._record_lifecycle(
+                mint=mint,
+                new_status="ABANDONED",
+                event="TokenRejected",
+                reason=reason,
+                details=None,
             )
 
+            self.abandoned_tokens += 1
             logger.debug(f"Token {mint[:8]}... abandoned: {reason}")
             return True
+
         except Exception as e:
-            logger.error(f"Error marking token abandoned: {e}")
+            logger.error(f"Error marking token abandoned {mint[:8]}...: {e}")
+            self.failed_updates += 1
             return False
+
+    async def mark_early_signal_sent(self, mint: str) -> bool:
+        """
+        Marca que ya se despachó una señal temprana.
+        """
+        updated = await self.update_token_state(
+            mint=mint,
+            state="EARLY_SIGNAL_SENT",
+            event="AlertDispatched",
+        )
+        if updated:
+            self.early_signals_sent += 1
+        return updated
+
+    async def get_state(self, mint: str) -> Optional[str]:
+        """
+        Devuelve el estado actual del token desde memoria.
+        """
+        return self.token_states.get(mint)
 
     def get_stats(self) -> dict:
         """
-        Get state manager statistics.
+        Devuelve estadísticas operativas del gestor de estados.
         """
+        state_counts: Dict[str, int] = {}
+        for state in self.token_states.values():
+            state_counts[state] = state_counts.get(state, 0) + 1
+
         return {
             "tracked_tokens": len(self.token_states),
             "early_signals_sent": self.early_signals_sent,
+            "lifecycle_updates": self.lifecycle_updates,
+            "abandoned_tokens": self.abandoned_tokens,
+            "failed_updates": self.failed_updates,
             "states": dict(self.token_states),
+            "state_counts": state_counts,
         }
+
+    def _normalize_state(self, state: str) -> str:
+        """
+        Normaliza estados para evitar basura tipográfica
+        sin bloquear estados nuevos del pipeline.
+        """
+        normalized = (state or "").strip().upper()
+        if not normalized:
+            return "FAILED"
+
+        if normalized not in self.VALID_STATES:
+            logger.warning(f"Unknown token state received: {normalized}")
+        return normalized
+
+    def _record_lifecycle(
+        self,
+        mint: str,
+        new_status: str,
+        event: Optional[str] = None,
+        reason: Optional[str] = None,
+        details: Optional[Dict[str, Any]] = None,
+        old_status: Optional[str] = None,
+    ) -> None:
+        """
+        Persiste la transición en token_lifecycle si el store lo soporta.
+        """
+        details_json = None
+        if details:
+            try:
+                details_json = json.dumps(details, ensure_ascii=False, default=str)
+            except Exception as json_error:
+                logger.warning(
+                    f"Could not serialize lifecycle details for {mint[:8]}...: {json_error}"
+                )
+
+        try:
+            if old_status is None:
+                old_status = self.token_states.get(mint)
+
+            self.store.update_token_lifecycle(
+                mint=mint,
+                status=new_status,
+                event=event,
+                reason=reason,
+                details_json=details_json,
+            )
+            self.lifecycle_updates += 1
+        except Exception as db_error:
+            logger.warning(
+                f"Could not record lifecycle transition for {mint[:8]}... -> {new_status}: {db_error}"
+            )
