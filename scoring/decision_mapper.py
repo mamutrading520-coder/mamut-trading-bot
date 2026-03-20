@@ -1,118 +1,140 @@
-﻿"""Decision mapper for token scoring analysis"""
-from typing import Dict, Any, Optional, List
+"""Decision mapper for token scoring analysis"""
+
+from __future__ import annotations
+
+from typing import Dict, Any, Optional
 from datetime import datetime
+
 from monitoring.logger import setup_logger
 from config.settings import Settings
 from core.event_bus import Event, get_event_bus
 
 logger = setup_logger("DecisionMapper")
 
-# Decision metadata mapping
-SCORE_METADATA = {
-    "high_potential": {
+
+DECISION_METADATA = {
+    "SIGNAL_EARLY": {
         "display_name": "HIGH_POTENTIAL",
         "color": "green",
-        "emoji": "🟢",
-        "description": "High quality token with good potential",
-        "action": "SIGNAL_EARLY"
+        "description": "High quality token with good early-entry potential",
     },
-    "medium_potential": {
+    "MONITOR": {
         "display_name": "MEDIUM_POTENTIAL",
         "color": "yellow",
-        "emoji": "🟡",
         "description": "Moderate quality token, worth monitoring",
-        "action": "MONITOR"
     },
-    "low_potential": {
+    "WARN": {
         "display_name": "LOW_POTENTIAL",
         "color": "orange",
-        "emoji": "🟠",
-        "description": "Low quality token, high risk",
-        "action": "WARN"
+        "description": "Low quality token, high caution required",
     },
-    "trash": {
+    "REJECT": {
         "display_name": "TRASH",
         "color": "red",
-        "emoji": "🔴",
-        "description": "Likely scam or rug pull",
-        "action": "REJECT"
-    }
+        "description": "Insufficient quality for signal generation",
+    },
 }
 
 
 class DecisionMapper:
-    """Maps scores to trading decisions"""
+    """Maps score outputs to trading decisions."""
 
     def __init__(self, settings: Settings):
         self.settings = settings
         self.event_bus = get_event_bus()
+
         self.decisions_made = 0
-        self.high_potential_count = 0
-        self.medium_potential_count = 0
-        self.low_potential_count = 0
+        self.signal_early_count = 0
+        self.monitor_count = 0
+        self.warn_count = 0
+        self.reject_count = 0
 
-    def _normalize_risk_level(self, risk_level: str) -> str:
-        """Normalize risk_level to match SCORE_METADATA keys"""
-        if not risk_level:
-            return "trash"
+    def _safe_float(self, value: Any, default: float = 0.0) -> float:
+        try:
+            if value is None:
+                return default
+            return float(value)
+        except (TypeError, ValueError):
+            return default
 
-        normalized = risk_level.lower().replace("-", "_")
+    def _make_reasoning(self, score_analysis: Dict[str, Any], decision: str) -> str:
+        final_score = self._safe_float(score_analysis.get("final_score", 0))
+        confidence = self._safe_float(score_analysis.get("confidence", 0))
+        aggregate_risk = self._safe_float(score_analysis.get("aggregate_risk_score", 0))
 
-        if normalized not in SCORE_METADATA:
-            return "trash"
+        breakdown = score_analysis.get("score_breakdown", {}) or {}
+        notes = breakdown.get("notes", []) or []
 
-        return normalized
+        reasoning = (
+            f"Decision={decision} | "
+            f"Score={final_score:.2f} | "
+            f"Confidence={confidence:.2f} | "
+            f"AggregateRisk={aggregate_risk:.2f}"
+        )
 
-    def _create_decision_reasoning(self, score_analysis: Dict[str, Any]) -> str:
-        """Create human-readable reasoning for the decision"""
-        final_score = score_analysis.get("final_score", 0)
-        risk_level = score_analysis.get("risk_level", "UNKNOWN")
-        confidence = score_analysis.get("confidence", 0)
-
-        reasoning = f"Score: {final_score:.1f}, Risk: {risk_level}, Confidence: {confidence:.2f}"
-
-        component_scores = score_analysis.get("component_scores", {})
-        if component_scores:
-            components = []
-            for key, value in component_scores.items():
-                components.append(f"{key}:{value:.1f}")
-            reasoning += f" | Components: {', '.join(components)}"
+        if notes:
+            reasoning += f" | Notes: {', '.join(notes)}"
 
         return reasoning
 
+    def _map_decision(self, score_analysis: Dict[str, Any]) -> Dict[str, Any]:
+        final_score = self._safe_float(score_analysis.get("final_score", 0))
+        confidence = self._safe_float(score_analysis.get("confidence", 0))
+        aggregate_risk = self._safe_float(score_analysis.get("aggregate_risk_score", 50))
+
+        mint = score_analysis.get("mint")
+        symbol = score_analysis.get("symbol", "UNKNOWN")
+
+        high_threshold = float(self.settings.score_threshold_high_potential)
+        medium_threshold = float(self.settings.score_threshold_medium_potential)
+        low_threshold = float(self.settings.score_threshold_low_potential)
+
+        # Gating by both score and confidence, with extra caution on residual risk
+        if final_score >= high_threshold and confidence >= 0.65 and aggregate_risk <= 45:
+            decision = "SIGNAL_EARLY"
+        elif final_score >= medium_threshold and confidence >= 0.45 and aggregate_risk <= 65:
+            decision = "MONITOR"
+        elif final_score >= low_threshold:
+            decision = "WARN"
+        else:
+            decision = "REJECT"
+
+        meta = DECISION_METADATA[decision]
+
+        return {
+            "mint": mint,
+            "symbol": symbol,
+            "final_score": final_score,
+            "confidence": confidence,
+            "decision": decision,
+            "classification": meta["display_name"],
+            "color": meta["color"],
+            "description": meta["description"],
+            "aggregate_risk_score": aggregate_risk,
+            "score_breakdown": score_analysis.get("score_breakdown", {}),
+            "reasoning": self._make_reasoning(score_analysis, decision),
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+
     def make_decision(self, score_analysis: Dict[str, Any]) -> Dict[str, Any]:
-        """Make trading decision based on score"""
+        """Make decision based on score + confidence + residual risk."""
         try:
-            final_score = score_analysis.get("final_score", 0)
-            risk_level = score_analysis.get("risk_level", "TRASH")
-            confidence = score_analysis.get("confidence", 0)
-            mint = score_analysis.get("mint")
-            symbol = score_analysis.get("symbol", "UNKNOWN")
-
-            normalized_risk = self._normalize_risk_level(risk_level)
-            metadata = SCORE_METADATA.get(normalized_risk, SCORE_METADATA["trash"])
-
-            decision = {
-                "mint": mint,
-                "symbol": symbol,
-                "final_score": final_score,
-                "risk_level": risk_level,
-                "confidence": confidence,
-                "decision": metadata.get("action", "REJECT"),
-                "description": metadata.get("description", "Unknown"),
-                "reasoning": self._create_decision_reasoning(score_analysis),
-                "timestamp": datetime.utcnow().isoformat(),
-            }
+            decision = self._map_decision(score_analysis)
 
             self.decisions_made += 1
-            if normalized_risk == "high_potential":
-                self.high_potential_count += 1
-            elif normalized_risk == "medium_potential":
-                self.medium_potential_count += 1
-            elif normalized_risk == "low_potential":
-                self.low_potential_count += 1
+            action = decision["decision"]
+            if action == "SIGNAL_EARLY":
+                self.signal_early_count += 1
+            elif action == "MONITOR":
+                self.monitor_count += 1
+            elif action == "WARN":
+                self.warn_count += 1
+            else:
+                self.reject_count += 1
 
-            logger.debug(f"Decision made: {mint[:8]}... -> {decision['decision']}")
+            logger.debug(
+                f"Decision made: {decision.get('mint', 'UNKNOWN')} -> {action}"
+            )
             return decision
 
         except Exception as e:
@@ -121,50 +143,47 @@ class DecisionMapper:
                 "mint": score_analysis.get("mint"),
                 "symbol": score_analysis.get("symbol", "UNKNOWN"),
                 "error": str(e),
-                "decision": "REJECT"
+                "decision": "REJECT",
             }
 
     async def map_and_emit(self, event: Event) -> Optional[str]:
-        """Map score to decision and emit DecisionMade event"""
+        """Map score to decision and emit DecisionMade event."""
         try:
             decision = self.make_decision(event.data)
-
             if "error" in decision:
-                logger.warning(f"Failed to make decision for {event.data.get('mint', 'UNKNOWN')}")
+                logger.warning(
+                    f"Failed to make decision for {event.data.get('mint', 'UNKNOWN')}"
+                )
                 return None
-
-            decision_action = decision.get("decision", "REJECT")
-            risk_level = decision.get("risk_level", "TRASH")
 
             decision_event = Event(
                 event_type="DecisionMade",
                 data=decision,
                 source="DecisionMapper",
-                timestamp=datetime.utcnow()
+                timestamp=datetime.utcnow(),
             )
 
             await self.event_bus.emit(decision_event)
-            logger.info(f"✓ DecisionMade emitted: {decision_action} (risk={risk_level})")
-
-            return decision_action
+            logger.info(
+                f"DecisionMade emitted: {decision['decision']} "
+                f"(score={decision['final_score']:.2f}, conf={decision['confidence']:.2f})"
+            )
+            return decision["decision"]
 
         except Exception as e:
             logger.error(f"Error in map_and_emit: {e}", exc_info=True)
             return None
 
     def get_stats(self) -> Dict[str, Any]:
-        """Get statistics"""
         total = self.decisions_made
-        high_pct = (self.high_potential_count / total * 100) if total > 0 else 0
-        medium_pct = (self.medium_potential_count / total * 100) if total > 0 else 0
-        low_pct = (self.low_potential_count / total * 100) if total > 0 else 0
-
         return {
-            "decisions_made": self.decisions_made,
-            "high_potential_count": self.high_potential_count,
-            "high_potential_pct": f"{high_pct:.1f}%",
-            "medium_potential_count": self.medium_potential_count,
-            "medium_potential_pct": f"{medium_pct:.1f}%",
-            "low_potential_count": self.low_potential_count,
-            "low_potential_pct": f"{low_pct:.1f}%",
+            "decisions_made": total,
+            "signal_early_count": self.signal_early_count,
+            "monitor_count": self.monitor_count,
+            "warn_count": self.warn_count,
+            "reject_count": self.reject_count,
+            "signal_early_pct": f"{(self.signal_early_count / total * 100):.1f}%" if total else "0.0%",
+            "monitor_pct": f"{(self.monitor_count / total * 100):.1f}%" if total else "0.0%",
+            "warn_pct": f"{(self.warn_count / total * 100):.1f}%" if total else "0.0%",
+            "reject_pct": f"{(self.reject_count / total * 100):.1f}%" if total else "0.0%",
         }
