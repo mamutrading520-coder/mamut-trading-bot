@@ -50,6 +50,8 @@ TRASH_FILTER_THRESHOLDS = {
     "min_initial_buyers": 5,
     "max_creator_concentration": 90,
     "min_unique_holders": 10,
+    "max_total_risk": 75,
+    "max_metadata_risk": 90,
 }
 
 # Creator Risk Thresholds
