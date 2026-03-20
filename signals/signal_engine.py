@@ -255,6 +255,23 @@ class SignalEngine:
             }
 
             self.store.create_structured_signal(signal_db_data)
+            
+            details_json = None
+            try:
+                details_json = json.dumps(signal.metadata or {}, ensure_ascii=False, default=str)
+            except Exception as json_error:
+                logger.warning(
+                    f"Could not serialize signal history details for {signal.signal_id}: {json_error}"
+                )
+
+            self.store.create_signal_history(
+                signal_id=signal.signal_id,
+                mint=signal.mint,
+                old_state=old_state,
+                new_state=new_state,
+                reason=history_reason,
+                details_json=details_json,
+            )
 
             self.store.create_performance_metric(
                 operation=operation_name,
