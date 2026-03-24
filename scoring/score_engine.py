@@ -119,7 +119,7 @@ class ScoreEngine:
         elif metadata_risk >= 65 and metadata_retrieved:
             score -= 2
 
-       if honeypot_risk >= 80:
+        if honeypot_risk >= 80:
             score -= 8
             notes.append("High honeypot risk")
         elif honeypot_risk >= 60:
