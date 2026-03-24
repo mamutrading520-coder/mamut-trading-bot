@@ -96,7 +96,7 @@ class TokenEnricher:
         self.settings = settings
         self.rpc_url = settings.solana_rpc_url
         self.event_bus = get_event_bus()
-        self.timeout = TIMEOUTS.get("enrichment", 5)
+        self.timeout = TIMEOUTS.get("token_enrichment", 20)
 
         self.enriched_count = 0
         self.failed_count = 0
