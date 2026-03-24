@@ -377,7 +377,7 @@ class Orchestrator:
                     reason="Pool validation failed",
                 )
                 await self._stop_raydium_watch(mint)
-                self.lock_manager.release_token(mint)
+                self.lock_manager.unlock_token(mint)
                 return
 
             await self.state_manager.update_token_state(
