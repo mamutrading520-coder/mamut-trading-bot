@@ -11,8 +11,8 @@ class SignalDeduper:
     """Deduplicates signals within time window"""
     
     def __init__(self):
-        self.window = SIGNAL_DEDUP_CONFIG.get("window_seconds", 60)
-        self.min_score_diff = SIGNAL_DEDUP_CONFIG.get("min_score_diff", 5)
+        self.window = SIGNAL_DEDUP_CONFIG.get("dedup_window_seconds", 60)
+        self.min_score_diff = SIGNAL_DEDUP_CONFIG.get("min_score_diff_for_new_signal", 5)
         
         # Track recent signals: (mint, signal_type) -> (score, timestamp)
         self.recent_signals: Dict[Tuple[str, str], Tuple[float, float]] = {}
