@@ -237,53 +237,77 @@ class TrashFilterEngine:
             }
 
     def _calculate_metadata_risk(self, token_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Calculate metadata quality risk from TokenEnricher output."""
-        try:
-            metadata_score = float(token_data.get("metadata_score", 0.0) or 0.0)
-            metadata_flags = list(token_data.get("metadata_risk_flags", []) or [])
-            social_count = int(token_data.get("social_count", 0) or 0)
+    """Calculate metadata quality risk from TokenEnricher output."""
+    try:
+        metadata_score_raw = token_data.get("metadata_score")
+        metadata_flags = list(token_data.get("metadata_risk_flags", []) or [])
+        social_count = int(token_data.get("social_count", 0) or 0)
+        metadata_json = token_data.get("metadata_json")
+        metadata_retrieved = bool(token_data.get("metadata_retrieved", False))
 
-            reasons: List[str] = []
-            warnings: List[str] = []
+        reasons: List[str] = []
+        warnings: List[str] = []
 
-            risk_score = max(0.0, min(100.0, 100.0 - metadata_score))
+        # Caso 1: metadata aún no disponible o claramente incompleta.
+        # En etapa temprana esto NO debe equivaler a scam.
+        if metadata_score_raw is None:
+            risk_score = 35.0
+            warnings.append("Metadata score no disponible aún")
+        else:
+            metadata_score = float(metadata_score_raw or 0.0)
 
-            if metadata_score < 20:
-                reasons.append("Metadata muy deficiente")
-            elif metadata_score < 40:
-                warnings.append("Metadata débil")
+            # Si score=0 pero ni siquiera se ha recuperado metadata real,
+            # tratamos esto como información insuficiente, no como basura confirmada.
+            if metadata_score <= 0 and not metadata_retrieved and not metadata_json:
+                risk_score = 35.0
+                warnings.append("Metadata aún no enriquecida")
+            else:
+                # Escala menos agresiva que 100 - score
+                risk_score = max(5.0, min(85.0, 70.0 - (metadata_score * 0.6)))
 
-            if social_count == 0:
-                warnings.append("Sin sociales detectadas")
-                risk_score += 8.0
-            elif social_count >= 2:
-                risk_score -= 5.0
+                if metadata_score < 20:
+                    warnings.append("Metadata muy débil")
+                elif metadata_score < 40:
+                    warnings.append("Metadata débil")
+                elif metadata_score >= 70:
+                    risk_score -= 10.0
 
-            if metadata_flags:
-                warnings.append(f"Metadata flags: {', '.join(metadata_flags)}")
-                risk_score += min(len(metadata_flags) * 4.0, 15.0)
+        if social_count == 0:
+            warnings.append("Sin sociales detectadas")
+            risk_score += 5.0
+        elif social_count >= 2:
+            risk_score -= 8.0
 
-            risk_score = max(0.0, min(100.0, risk_score))
+        if metadata_flags:
+            warnings.append(f"Metadata flags: {', '.join(metadata_flags)}")
+            risk_score += min(len(metadata_flags) * 3.0, 12.0)
 
-            return {
-                "score": risk_score,
-                "metadata_score": metadata_score,
-                "metadata_risk_flags": metadata_flags,
-                "social_count": social_count,
-                "reasons": reasons,
-                "warnings": warnings,
-            }
+        risk_score = max(0.0, min(100.0, risk_score))
 
-        except Exception as e:
-            logger.debug(f"Error calculating metadata risk: {e}")
-            return {
-                "score": 50.0,
-                "metadata_score": 0.0,
-                "metadata_risk_flags": [],
-                "social_count": 0,
-                "reasons": [f"Metadata risk error: {e}"],
-                "warnings": [],
-            }
+        return {
+            "score": risk_score,
+            "metadata_score": float(metadata_score_raw or 0.0) if metadata_score_raw is not None else None,
+            "metadata_risk_flags": metadata_flags,
+            "social_count": social_count,
+            "reasons": reasons,
+            "warnings": warnings,
+            "metadata_retrieved": metadata_retrieved,
+            "metadata_present": bool(metadata_json),
+        }
+
+    except Exception as e:
+        logger.debug(f"Error calculating metadata risk: {e}")
+        return {
+            "score": 40.0,
+            "metadata_score": None,
+            "metadata_risk_flags": [],
+            "social_count": 0,
+            "reasons": [],
+            "warnings": [f"Metadata risk fallback: {e}"],
+            "metadata_retrieved": False,
+            "metadata_present": False,
+        }
+    
 
     def _combine_risks(
         self,
