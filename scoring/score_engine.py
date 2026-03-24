@@ -29,7 +29,7 @@ class ScoreEngine:
 
     def _compute_quality_score(self, token_data: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Build final score from residual quality and risk.
+        Build final score from early-stage quality signals and residual risk.
         Returns:
         - final_score: 0..100
         - confidence: 0..1
@@ -39,64 +39,109 @@ class ScoreEngine:
         metadata_score = self._safe_float(token_data.get("metadata_score", 0))
         social_count = int(token_data.get("social_count", 0) or 0)
 
-        aggregate_risk = self._safe_float(token_data.get("aggregate_risk_score", 50))
-        authority_risk = self._safe_float(token_data.get("authority_risk", 50))
-        creator_risk = self._safe_float(token_data.get("creator_risk", 50))
-        concentration_risk = self._safe_float(token_data.get("concentration_risk", 50))
-        metadata_risk = self._safe_float(token_data.get("metadata_risk", 50))
-        honeypot_risk = self._safe_float(token_data.get("honeypot_risk", 50))
+        aggregate_risk = self._safe_float(token_data.get("aggregate_risk_score", 35))
+        authority_risk = self._safe_float(token_data.get("authority_risk", 40))
+        creator_risk = self._safe_float(token_data.get("creator_risk", 45))
+        concentration_risk = self._safe_float(token_data.get("concentration_risk", 35))
+        metadata_risk = self._safe_float(token_data.get("metadata_risk", 40))
+        honeypot_risk = self._safe_float(token_data.get("honeypot_risk", 30))
 
-        score = 50.0
+        metadata_retrieved = bool(token_data.get("metadata_retrieved", False))
+        metadata_present = bool(token_data.get("metadata_json"))
+
+        score = 62.0
         notes = []
 
-        # Metadata quality
-        if metadata_score >= 80:
-            score += 12
-            notes.append("Strong metadata quality")
-        elif metadata_score >= 60:
-            score += 8
-            notes.append("Good metadata quality")
-        elif metadata_score >= 40:
-            score += 4
+        # Metadata quality: no castigar fuerte si aún no llegó metadata real
+        if not metadata_retrieved and not metadata_present:
+            notes.append("Metadata pending")
         else:
-            score -= 6
-            notes.append("Weak metadata quality")
+            if metadata_score >= 80:
+                score += 10
+                notes.append("Strong metadata quality")
+            elif metadata_score >= 60:
+                score += 7
+                notes.append("Good metadata quality")
+            elif metadata_score >= 40:
+                score += 3
+                notes.append("Acceptable metadata quality")
+            elif metadata_score > 0:
+                score -= 4
+                notes.append("Weak metadata quality")
 
-        # Social presence
+        # Social presence: señal positiva, pero ausencia no debe matar early tokens
         if social_count >= 3:
-            score += 8
+            score += 7
             notes.append("Strong social presence")
         elif social_count == 2:
-            score += 5
+            score += 4
         elif social_count == 1:
             score += 2
         else:
-            score -= 4
+            score -= 1
             notes.append("No socials detected")
 
-        # Market cap sanity for early tokens
-        if 20 <= market_cap_sol <= 250:
-            score += 8
+        # Early market-cap sanity
+        if 15 <= market_cap_sol <= 250:
+            score += 6
             notes.append("Healthy early market cap range")
-        elif 10 <= market_cap_sol < 20:
-            score += 4
+        elif 5 <= market_cap_sol < 15:
+            score += 3
         elif market_cap_sol > 500:
-            score -= 4
+            score -= 3
             notes.append("Late/extended market cap profile")
 
-        # Residual risks
-        score -= aggregate_risk * 0.20
-        score -= authority_risk * 0.08
-        score -= creator_risk * 0.08
-        score -= concentration_risk * 0.06
-        score -= metadata_risk * 0.05
-        score -= honeypot_risk * 0.10
+        # Main residual-risk penalty: usar aggregate como castigo principal
+        score -= aggregate_risk * 0.38
+
+        # Secondary fine-tuning only for extreme risks
+        if authority_risk >= 80:
+            score -= 6
+            notes.append("High authority risk")
+        elif authority_risk >= 60:
+            score -= 3
+
+        if creator_risk >= 80:
+            score -= 5
+            notes.append("High creator risk")
+        elif creator_risk >= 60:
+            score -= 2
+
+        if concentration_risk >= 85:
+            score -= 5
+            notes.append("High concentration risk")
+        elif concentration_risk >= 65:
+            score -= 2
+
+        if metadata_risk >= 85 and metadata_retrieved:
+            score -= 5
+            notes.append("High metadata risk")
+        elif metadata_risk >= 65 and metadata_retrieved:
+            score -= 2
+
+       if honeypot_risk >= 80:
+            score -= 8
+            notes.append("High honeypot risk")
+        elif honeypot_risk >= 60:
+            score -= 4
 
         final_score = round(max(0.0, min(100.0, score)), 2)
 
-        # Confidence reflects both score and risk cleanliness
+        # Confidence: mezcla de score, limpieza y completitud de datos
+        data_completeness = 0.0
+        if metadata_retrieved or metadata_present:
+            data_completeness += 0.2
+        if social_count > 0:
+            data_completeness += 0.1
+        if market_cap_sol > 0:
+            data_completeness += 0.1
+
         cleanliness = max(0.0, 100.0 - aggregate_risk)
-        confidence = ((final_score * 0.6) + (cleanliness * 0.4)) / 100.0
+        confidence = (
+            (final_score / 100.0) * 0.5
+            + (cleanliness / 100.0) * 0.3
+            + data_completeness * 0.2
+        )
         confidence = round(max(0.0, min(0.99, confidence)), 4)
 
         return {
@@ -112,9 +157,14 @@ class ScoreEngine:
                 "concentration_risk": concentration_risk,
                 "metadata_risk": metadata_risk,
                 "honeypot_risk": honeypot_risk,
+                "metadata_retrieved": metadata_retrieved,
+                "metadata_present": metadata_present,
                 "notes": notes,
             },
         }
+       
+       
+        
 
     async def score_and_emit(self, event: Event) -> bool:
         """Score token and emit ScoreCalculated."""
