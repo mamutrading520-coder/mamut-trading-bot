@@ -186,7 +186,7 @@ class TrashFilterEngine:
             total_supply = float(token_data.get("total_supply", 0) or 0)
             holder_count = int(token_data.get("holder_count", 0) or 0)
 
-            risk_score = 50.0
+            risk_score = 35.0
             creator_percentage = 0.0
             reasons: List[str] = []
             warnings: List[str] = []
