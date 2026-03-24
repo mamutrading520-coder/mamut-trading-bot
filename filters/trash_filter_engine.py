@@ -147,7 +147,7 @@ class TrashFilterEngine:
                             risk_score += 8.0
             else:
                 warnings.append("Creator sin historial conocido")
-                risk_score = 65.0
+                risk_score = 45.0
 
             risk_score = max(0.0, min(100.0, risk_score))
 
