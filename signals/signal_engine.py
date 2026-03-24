@@ -1,7 +1,7 @@
 """Generate trading signals from token analysis"""
-
 from __future__ import annotations
 
+import json
 import time
 import uuid
 from dataclasses import dataclass
@@ -18,7 +18,6 @@ logger = setup_logger("SignalEngine")
 @dataclass
 class SignalData:
     """Signal data structure"""
-
     signal_id: str
     signal_type: str
     mint: str
@@ -31,7 +30,6 @@ class SignalData:
     timestamp: datetime
 
     def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary"""
         return {
             "signal_id": self.signal_id,
             "signal_type": self.signal_type,
@@ -53,18 +51,14 @@ class SignalEngine:
         self.store = store
         self.settings = settings
         self.event_bus = get_event_bus()
-
         self.score_threshold = settings.score_threshold_high_potential
-
         self.signals_generated = 0
         self.early_signals = 0
         self.confirmation_signals = 0
         self.abandon_signals = 0
 
     async def generate_early_and_emit(self, event: Event) -> bool:
-        """Generate EARLY signal and emit to event bus with persistence to DB."""
         start_time = time.time()
-
         try:
             decision_data = event.data or {}
             decision_str = decision_data.get("decision", "UNKNOWN")
@@ -117,15 +111,7 @@ class SignalEngine:
         event: Event,
         token_context: Optional[Dict[str, Any]] = None,
     ) -> bool:
-        """
-        Generate CONFIRMED signal from market confirmation and emit it.
-
-        Expected source:
-        - event.event_type == "MarketConfirmed"
-        - event.data includes market confirmation output
-        """
         start_time = time.time()
-
         try:
             confirmation_data = event.data or {}
             token_context = token_context or {}
@@ -147,7 +133,10 @@ class SignalEngine:
             confidence = self._safe_float(
                 confirmation_data.get(
                     "new_confidence",
-                    confirmation_data.get("confidence", token_context.get("confidence", 0.5)),
+                    confirmation_data.get(
+                        "confidence",
+                        token_context.get("confidence", 0.5),
+                    ),
                 )
             )
 
@@ -165,7 +154,6 @@ class SignalEngine:
                 "risk_level",
                 token_context.get("decision", "CONFIRMED"),
             )
-
             confirmation_reason = confirmation_data.get(
                 "reason",
                 "Market confirmed after Raydium pool validation",
@@ -225,8 +213,6 @@ class SignalEngine:
         except Exception as e:
             logger.error(f"Error in generate_confirmed_and_emit: {e}")
             return False
-            
-import json
 
     def _persist_signal(
         self,
@@ -237,7 +223,6 @@ import json
         operation_name: str = "signal_persistence",
         started_at: Optional[float] = None,
     ) -> None:
-        """Persist signal to database with full structured payload."""
         if not self.store:
             return
 
@@ -257,7 +242,7 @@ import json
             }
 
             self.store.create_structured_signal(signal_db_data)
-            
+
             details_json = None
             try:
                 details_json = json.dumps(signal.metadata or {}, ensure_ascii=False, default=str)
@@ -290,7 +275,6 @@ import json
 
         except Exception as e:
             logger.error(f"Failed to persist signal {signal.signal_id}: {e}")
-
             try:
                 self.store.create_performance_metric(
                     operation=operation_name,
@@ -306,10 +290,9 @@ import json
                 )
             except Exception as perf_error:
                 logger.error(f"Failed to persist performance metric: {perf_error}")
-            
+
     @staticmethod
     def _safe_float(value: Any, default: float = 0.0) -> float:
-        """Convert values safely to float."""
         try:
             if value is None:
                 return default
@@ -318,7 +301,6 @@ import json
             return default
 
     def get_stats(self) -> dict:
-        """Get signal engine statistics"""
         return {
             "signals_generated": self.signals_generated,
             "early_signals": self.early_signals,
