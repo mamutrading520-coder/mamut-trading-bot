@@ -134,7 +134,7 @@ class Orchestrator:
                 symbol=symbol,
             )
             if not initialized:
-                self.lock_manager.release_token(mint)
+                self.lock_manager.unlock_token(mint)
                 return
 
             self._merge_token_context(mint, event.data)
@@ -237,7 +237,7 @@ class Orchestrator:
 
             await self.state_manager.mark_abandoned(mint, reason)
             await self._stop_raydium_watch(mint)
-            self.lock_manager.release_token(mint)
+            self.lock_manager.unlock_token(mint)
 
         except Exception as e:
             logger.error(f"Error handling TokenRejected: {e}")
@@ -301,7 +301,13 @@ class Orchestrator:
 
             signal_type = event.data.get("signal_type", "UNKNOWN")
 
-            if self.signal_deduper.is_duplicate(mint=mint, signal_type=signal_type):
+            score = float(event.data.get("score", event.data.get("final_score", 0)) or 0)
+
+            if self.signal_deduper.is_duplicate(
+                mint=mint,
+                signal_type=signal_type,
+                score=score,
+            ):
                 logger.debug(f"Duplicate signal skipped for {mint[:8]}... ({signal_type})")
                 return
 
@@ -409,7 +415,7 @@ class Orchestrator:
             self.market_confirmations[mint] = confirmation or {}
 
             if not confirmation or not confirmation.get("is_confirmed", False):
-                self.lock_manager.release_token(mint)
+                self.lock_manager.unlock_token(mint)
                 return
 
             market_event = Event(
@@ -440,7 +446,7 @@ class Orchestrator:
             )
 
             await self._stop_raydium_watch(mint)
-            self.lock_manager.release_token(mint)
+            self.lock_manager.unlock_token(mint)
 
         except Exception as e:
             logger.error(f"Error handling PoolSearchTimeout: {e}")
@@ -467,7 +473,7 @@ class Orchestrator:
                 )
 
             await self._stop_raydium_watch(mint)
-            self.lock_manager.release_token(mint)
+            self.lock_manager.unlock_token(mint)
 
         except Exception as e:
             logger.error(f"Error handling MarketConfirmed: {e}")
