@@ -12,7 +12,7 @@ class TokenLockManager:
     
     def __init__(self):
         self.locks: Dict[str, float] = {}  # mint -> lock_time
-        self.timeout = TOKEN_LOCK_CONFIG.get("timeout_seconds", 3600)
+        self.timeout = TOKEN_LOCK_CONFIG.get("lock_timeout_seconds", 300)
         self.locked_count = 0
         self.released_count = 0
     
