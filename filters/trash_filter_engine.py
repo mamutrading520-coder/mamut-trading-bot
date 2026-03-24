@@ -384,7 +384,14 @@ class TrashFilterEngine:
         if honeypot_risk.get("is_suspicious", False) and honeypot_risk.get("risk_score", 0) >= 70:
             rejection_reasons.append("High honeypot/suspicious-token risk")
 
-        if metadata_risk["score"] > TRASH_FILTER_THRESHOLDS.get("max_metadata_risk", 90):
+        metadata_present = metadata_risk.get("metadata_present", False)
+        metadata_retrieved = metadata_risk.get("metadata_retrieved", False)
+
+        if (
+            metadata_present
+            and metadata_retrieved
+            and metadata_risk["score"] > TRASH_FILTER_THRESHOLDS.get("max_metadata_risk", 90)
+        ):
             rejection_reasons.append("Exceeds metadata risk threshold")
 
         if aggregate["risk_score"] > TRASH_FILTER_THRESHOLDS.get("max_total_risk", 75):
