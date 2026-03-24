@@ -288,7 +288,7 @@ class Orchestrator:
                 await self._start_raydium_watch(mint)
 
             elif decision in {"REJECT", "IGNORE", "NO_SIGNAL"}:
-                self.lock_manager.release_token(mint)
+                self.lock_manager.unlock_token(mint)
 
         except Exception as e:
             logger.error(f"Error handling DecisionMade: {e}")
