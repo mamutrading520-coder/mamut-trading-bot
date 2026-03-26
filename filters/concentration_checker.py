@@ -24,47 +24,49 @@ class ConcentrationChecker:
     
     async def _fetch_holder_data(self, mint: str) -> Optional[Dict[str, Any]]:
         """
-        Fetch holder distribution from public API
-        
+        Fetch holder distribution from public API.
+
+        All candidate URLs are requested concurrently; the first successful
+        response is used so overall latency equals the fastest responder
+        rather than the sum of all timeouts.
+
         Args:
             mint: Token mint address
-            
+
         Returns:
             Holder data dictionary or None
         """
         try:
             client = await self._get_http_client()
-            
-            # Try multiple holder data sources
+
             urls = [
                 f"https://api.solscan.io/token/holders?token={mint}&limit=100",
                 f"https://api.helius.xyz/v0/token/metadata?token={mint}",
             ]
-            
-            for url in urls:
+
+            async def _fetch(url: str) -> Optional[Dict[str, Any]]:
                 try:
-                    response = await asyncio.wait_for(
-                        client.get(url),
-                        timeout=2.0
-                    )
-                    
+                    response = await asyncio.wait_for(client.get(url), timeout=2.0)
                     if response.status_code == 200:
                         data = response.json()
-                        
-                        # Parse based on source
                         if "result" in data:
                             return self._parse_solscan_holders(data["result"])
                         elif "token" in data:
                             return self._parse_helius_data(data)
-                
+                    return None
                 except asyncio.TimeoutError:
-                    continue
+                    return None
                 except Exception as e:
                     logger.debug(f"Error fetching from {url}: {e}")
-                    continue
-            
+                    return None
+
+            results = await asyncio.gather(*[_fetch(url) for url in urls], return_exceptions=True)
+            for result in results:
+                if result is not None and not isinstance(result, BaseException):
+                    return result
+
             return None
-            
+
         except Exception as e:
             logger.debug(f"Error fetching holder data for {mint}: {e}")
             return None

@@ -64,6 +64,27 @@ class RaydiumListener:
             logger.error(f"Error fetching Raydium pools: {e}")
             return None
 
+    @staticmethod
+    def _build_pool_index(
+        pools: List[Dict[str, Any]],
+    ) -> Dict[str, Dict[str, Any]]:
+        """
+        Build an O(1) mint-address → pool-info lookup from the pools list.
+
+        Each pool can appear under both its mintA and mintB addresses so that
+        any monitored token can be found with a single dict lookup instead of
+        an O(N) linear scan.
+        """
+        index: Dict[str, Dict[str, Any]] = {}
+        for pool in pools:
+            mint_a = pool.get("mintA", {}).get("address", "")
+            mint_b = pool.get("mintB", {}).get("address", "")
+            if mint_a:
+                index[mint_a] = pool
+            if mint_b:
+                index[mint_b] = pool
+        return index
+
     def _search_token_in_pools(
         self,
         mint: str,
@@ -95,6 +116,36 @@ class RaydiumListener:
 
         except Exception as e:
             logger.debug(f"Error searching token in pools: {e}")
+            return None
+
+    def _lookup_token_in_index(
+        self,
+        mint: str,
+        pool_index: Dict[str, Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        """
+        O(1) pool lookup using a pre-built pool index.
+        """
+        try:
+            pool = pool_index.get(mint)
+            if pool is None:
+                return None
+            mint_a = pool.get("mintA", {}).get("address", "")
+            mint_b = pool.get("mintB", {}).get("address", "")
+            return {
+                "pool_id": pool.get("id"),
+                "amm_id": pool.get("ammId"),
+                "pool_address": pool.get("id"),
+                "mint_a": mint_a,
+                "mint_b": mint_b,
+                "base_mint": mint_a,
+                "quote_mint": mint_b if mint_a == mint else mint_a,
+                "program_id": pool.get("programId"),
+                "open_time": pool.get("openTime"),
+                "source": "raydium",
+            }
+        except Exception as e:
+            logger.debug(f"Error looking up token in pool index: {e}")
             return None
 
     async def start_monitoring(
@@ -132,6 +183,12 @@ class RaydiumListener:
             del self.monitored_tokens[mint]
             logger.debug(f"Stopped monitoring {mint[:8]}...")
 
+    async def _handle_pool_found(self, mint: str, pool_data: Dict[str, Any]) -> None:
+        """Update shared state when a Raydium pool is found for a monitored token."""
+        self.pools_found += 1
+        logger.info(f"Pool found for {mint[:8]}...: {pool_data['pool_id']}")
+        await self.stop_monitoring(mint)
+
     async def check_token_pool(self, mint: str) -> Optional[Dict[str, Any]]:
         """
         Check if token has a Raydium pool.
@@ -144,9 +201,7 @@ class RaydiumListener:
 
             pool_data = self._search_token_in_pools(mint, pools)
             if pool_data:
-                self.pools_found += 1
-                logger.info(f"Pool found for {mint[:8]}...: {pool_data['pool_id']}")
-                await self.stop_monitoring(mint)
+                await self._handle_pool_found(mint, pool_data)
                 return pool_data
 
         except Exception as e:
@@ -158,6 +213,10 @@ class RaydiumListener:
         """
         Monitor all tracked tokens for pool appearance.
         Emits PoolFound or PoolSearchTimeout.
+
+        Pools are fetched once per cycle and indexed by mint address so that
+        all monitored tokens can be checked with O(1) lookups instead of an
+        O(N) linear scan per token.
         """
         logger.info("Starting Raydium pool monitor")
 
@@ -167,6 +226,12 @@ class RaydiumListener:
                 if not mints_to_check:
                     await asyncio.sleep(5)
                     continue
+
+                # Fetch pools once per cycle, then build an O(1) lookup index.
+                pools = await self._fetch_raydium_pools()
+                pool_index: Dict[str, Dict[str, Any]] = (
+                    self._build_pool_index(pools) if pools else {}
+                )
 
                 for mint in mints_to_check:
                     watch_context = self.monitored_tokens.get(mint, {})
@@ -201,8 +266,10 @@ class RaydiumListener:
                         await self.stop_monitoring(mint)
                         continue
 
-                    pool_data = await self.check_token_pool(mint)
+                    pool_data = self._lookup_token_in_index(mint, pool_index)
                     if pool_data:
+                        await self._handle_pool_found(mint, pool_data)
+
                         pool_event = Event(
                             event_type="PoolFound",
                             data={
