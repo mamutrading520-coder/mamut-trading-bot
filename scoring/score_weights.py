@@ -1,4 +1,4 @@
-﻿"""Score calculation and weighting logic"""
+"""Score calculation and weighting logic"""
 from typing import Dict, Any
 
 # Score weights for different components

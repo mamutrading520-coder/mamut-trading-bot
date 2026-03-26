@@ -1,4 +1,4 @@
-﻿"""Analyze token velocity and rate of change"""
+"""Analyze token velocity and rate of change"""
 from typing import Dict, Any, Optional
 from datetime import datetime
 from monitoring.logger import setup_logger

@@ -1,6 +1,6 @@
-﻿"""Async event bus for decoupled event processing"""
+"""Async event bus for decoupled event processing"""
 import asyncio
-from typing import Callable, Dict, List, Any, Awaitable, Optional
+from typing import Callable, Dict, List, Any, Awaitable, Optional, Union
 from dataclasses import dataclass
 from datetime import datetime
 from monitoring.logger import setup_logger
@@ -159,7 +159,7 @@ class EventBus:
             
             logger.info(f"Event bus stopped. Processed {self._event_count} events")
     
-    def get_listener_count(self, event_type: Optional[str] = None) -> Dict[str, int] | int:
+    def get_listener_count(self, event_type: Optional[str] = None) -> Union[Dict[str, int], int]:
         """Get number of listeners"""
         if event_type:
             return len(self._listeners.get(event_type, []))

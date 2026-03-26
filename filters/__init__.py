@@ -1,4 +1,4 @@
-﻿"""Filters module"""
+"""Filters module"""
 from filters.trash_filter_engine import TrashFilterEngine
 
 __all__ = [

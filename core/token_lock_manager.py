@@ -1,4 +1,4 @@
-﻿"""Manage token locks to prevent duplicate processing"""
+"""Manage token locks to prevent duplicate processing"""
 from typing import Dict, Optional
 from datetime import datetime, timedelta
 from monitoring.logger import setup_logger

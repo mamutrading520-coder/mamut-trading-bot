@@ -1,4 +1,4 @@
-﻿"""Deduplicate signals to prevent duplicate alerts"""
+"""Deduplicate signals to prevent duplicate alerts"""
 from typing import Dict, Optional, Tuple
 from datetime import datetime
 from monitoring.logger import setup_logger

@@ -1,4 +1,4 @@
-﻿"""Utilities module for Mamut"""
+"""Utilities module for Mamut"""
 from utils.time_utils import (
     get_timestamp,
     get_timestamp_ms,

@@ -1,4 +1,4 @@
-﻿"""Analyze token trading flow and momentum"""
+"""Analyze token trading flow and momentum"""
 from typing import Dict, Any, Optional, List
 from datetime import datetime, timedelta
 from monitoring.logger import setup_logger

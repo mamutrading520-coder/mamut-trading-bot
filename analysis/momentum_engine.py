@@ -1,4 +1,4 @@
-﻿"""Token momentum analysis"""
+"""Token momentum analysis"""
 
 class MomentumEngine:
     """Analyzes token momentum"""

@@ -1,4 +1,4 @@
-﻿"""Launch tracking and monitoring"""
+"""Launch tracking and monitoring"""
 
 class LaunchTracker:
     """Tracks token launches"""

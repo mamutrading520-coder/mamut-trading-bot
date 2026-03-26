@@ -1,4 +1,4 @@
-﻿"""Creator wallet analysis and profiling"""
+"""Creator wallet analysis and profiling"""
 from typing import Optional, Dict, Any
 from datetime import datetime, timedelta
 from monitoring.logger import setup_logger

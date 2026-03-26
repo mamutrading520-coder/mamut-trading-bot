@@ -1,4 +1,4 @@
-﻿"""Pump.fun WebSocket listener for token discovery"""
+"""Pump.fun WebSocket listener for token discovery"""
 import asyncio
 import json
 from datetime import datetime

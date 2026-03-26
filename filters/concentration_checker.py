@@ -1,4 +1,4 @@
-﻿"""Check token holder concentration for distribution issues"""
+"""Check token holder concentration for distribution issues"""
 from typing import Dict, Any, Tuple, Optional
 from monitoring.logger import setup_logger
 from config.thresholds import CONCENTRATION_RISK_WEIGHTS, HONEYPOT_THRESHOLDS

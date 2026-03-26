@@ -1,4 +1,4 @@
-﻿"""Analyze buyer quality and distribution patterns"""
+"""Analyze buyer quality and distribution patterns"""
 from typing import Dict, Any, Optional, Tuple, List
 from datetime import datetime
 from monitoring.logger import setup_logger

@@ -1,4 +1,4 @@
-﻿"""Track token migration to Raydium"""
+"""Track token migration to Raydium"""
 from typing import Dict, Any, Optional
 from datetime import datetime
 from monitoring.logger import setup_logger

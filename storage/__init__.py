@@ -1,4 +1,4 @@
-﻿"""Storage module for Mamut"""
+"""Storage module for Mamut"""
 from storage.models import (
     Base,
     Token,
