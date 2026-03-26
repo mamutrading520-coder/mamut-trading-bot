@@ -47,6 +47,10 @@ class MetadataAnalyzer:
     URL_REGEX = re.compile(r"https?://[^\s]+", re.IGNORECASE)
     HANDLE_REGEX = re.compile(r"@[A-Za-z0-9_]{2,32}")
     EMOJI_HEAVY_REGEX = re.compile(r"[\U00010000-\U0010ffff]", re.UNICODE)
+    # Match twitter.com / x.com only when preceded by a protocol, slash, or @,
+    # preventing false positives from domains like "nottwitter.com".
+    TWITTER_DOMAIN_RE = re.compile(r"(?:https?://(?:www\.)?|[/@])twitter\.com")
+    X_COM_DOMAIN_RE = re.compile(r"(?:https?://(?:www\.)?|[/@])x\.com")
 
     def __init__(self) -> None:
         logger.debug("MetadataAnalyzer initialized")
@@ -74,20 +78,25 @@ class MetadataAnalyzer:
             combined_text = " ".join(
                 part for part in [name, symbol, description, website, twitter, telegram] if part
             ).strip()
+            combined_lower = combined_text.lower()
 
             urls_found = self.URL_REGEX.findall(combined_text)
             handles_found = self.HANDLE_REGEX.findall(combined_text)
 
-            suspicious_matches = self._find_keywords(
-                combined_text, self.SUSPICIOUS_KEYWORDS
+            suspicious_matches = self._find_keywords_lower(
+                combined_lower, self.SUSPICIOUS_KEYWORDS
             )
-            positive_matches = self._find_keywords(
-                combined_text, self.POSITIVE_KEYWORDS
+            positive_matches = self._find_keywords_lower(
+                combined_lower, self.POSITIVE_KEYWORDS
             )
 
             has_website = bool(website) or any("http" in u.lower() for u in urls_found)
-            has_twitter = bool(twitter) or "twitter.com" in combined_text.lower() or "x.com" in combined_text.lower()
-            has_telegram = bool(telegram) or "t.me/" in combined_text.lower()
+            has_twitter = (
+                bool(twitter)
+                or self.TWITTER_DOMAIN_RE.search(combined_lower) is not None
+                or self.X_COM_DOMAIN_RE.search(combined_lower) is not None
+            )
+            has_telegram = bool(telegram) or "t.me/" in combined_lower
 
             symbol_quality = self._score_symbol_quality(symbol)
             name_quality = self._score_name_quality(name)
@@ -175,6 +184,15 @@ class MetadataAnalyzer:
     def _find_keywords(self, text: str, keywords: set) -> List[str]:
         lowered = text.lower()
         return sorted([kw for kw in keywords if kw in lowered])
+
+    def _find_keywords_lower(self, lowered_text: str, keywords: set) -> List[str]:
+        """Search *keywords* in *lowered_text* (already lower-cased by the caller).
+
+        Note: *keywords* must contain only lower-case strings so that comparisons
+        against the pre-lowered text are correct.  All class-level keyword sets
+        (SUSPICIOUS_KEYWORDS, POSITIVE_KEYWORDS) satisfy this invariant.
+        """
+        return sorted([kw for kw in keywords if kw in lowered_text])
 
     def _score_symbol_quality(self, symbol: str) -> int:
         if not symbol:
