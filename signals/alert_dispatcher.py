@@ -1,4 +1,4 @@
-﻿"""Dispatch alerts through multiple channels"""
+"""Dispatch alerts through multiple channels"""
 from typing import Dict, Any, Optional, List
 from datetime import datetime
 from monitoring.logger import setup_logger

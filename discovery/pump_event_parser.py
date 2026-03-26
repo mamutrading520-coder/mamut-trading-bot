@@ -1,4 +1,4 @@
-﻿"""Parser for Pump.fun token events"""
+"""Parser for Pump.fun token events"""
 from typing import Optional, Dict, Any
 from dataclasses import dataclass
 from monitoring.logger import setup_logger

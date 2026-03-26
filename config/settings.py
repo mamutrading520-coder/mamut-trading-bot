@@ -1,4 +1,4 @@
-﻿"""Configuration settings for Mamut engine - loads from .env"""
+"""Configuration settings for Mamut engine - loads from .env"""
 from pydantic_settings import BaseSettings
 from typing import Optional
 

@@ -1,4 +1,4 @@
-﻿"""Creator risk pattern detection"""
+"""Creator risk pattern detection"""
 from typing import Dict, Any, Tuple
 from monitoring.logger import setup_logger
 from config.thresholds import CREATOR_RISK_PATTERNS

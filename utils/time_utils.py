@@ -1,4 +1,4 @@
-﻿"""Time utility functions for Mamut"""
+"""Time utility functions for Mamut"""
 from datetime import datetime, timedelta, timezone
 from typing import Union
 

@@ -1,2 +1,2 @@
-﻿# Analysis module
+# Analysis module
 

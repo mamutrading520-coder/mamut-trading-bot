@@ -1,4 +1,4 @@
-﻿"""Check token authorities for honeypot indicators"""
+"""Check token authorities for honeypot indicators"""
 from typing import Dict, Any, Tuple
 from monitoring.logger import setup_logger
 from config.thresholds import AUTHORITY_RISK_WEIGHTS, HONEYPOT_THRESHOLDS

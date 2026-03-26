@@ -1,4 +1,4 @@
-﻿"""Logging configuration for Mamut engine using loguru"""
+"""Logging configuration for Mamut engine using loguru"""
 import sys
 from pathlib import Path
 from loguru import logger

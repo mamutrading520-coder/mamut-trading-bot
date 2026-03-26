@@ -1,4 +1,4 @@
-﻿"""Configuration thresholds for Mamut"""
+"""Configuration thresholds for Mamut"""
 
 # Request Timeouts
 TIMEOUTS = {

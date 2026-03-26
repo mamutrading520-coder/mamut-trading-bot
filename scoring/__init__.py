@@ -1,2 +1,2 @@
-﻿# Scoring module
+# Scoring module
 

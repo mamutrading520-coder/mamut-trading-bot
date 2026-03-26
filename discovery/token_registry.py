@@ -1,4 +1,4 @@
-﻿"""Token registry tracking"""
+"""Token registry tracking"""
 
 class TokenRegistry:
     """Tracks discovered tokens"""

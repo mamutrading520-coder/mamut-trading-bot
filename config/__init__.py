@@ -1,4 +1,4 @@
-﻿"""Configuration module for Mamut"""
+"""Configuration module for Mamut"""
 from config.settings import Settings
 from config.thresholds import (
     TRASH_FILTER_THRESHOLDS,
