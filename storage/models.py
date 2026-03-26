@@ -228,33 +228,6 @@ class PerformanceMetrics(Base):
     )
 
 
-class SignalOutcome(Base):
-    """Signal performance and trading outcome tracking"""
-
-    __tablename__ = "signal_outcomes"
-
-    id = Column(Integer, primary_key=True, index=True)
-    signal_id = Column(String(255), unique=True, nullable=False, index=True)
-    mint = Column(String(255), nullable=False, index=True)
-    creator = Column(String(255), index=True)
-
-    outcome = Column(String(50))  # WIN, LOSS, NEUTRAL, UNKNOWN
-    entry_price_sol = Column(Float)
-    exit_price_sol = Column(Float)
-    peak_price_sol = Column(Float)
-    return_pct = Column(Float)
-    hold_duration_minutes = Column(Integer)
-    notes = Column(Text)
-    metadata_json = Column(Text)
-
-    created_at = Column(DateTime, default=datetime.utcnow, index=True)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-
-    __table_args__ = (
-        Index("idx_so_mint_ts", "mint", "created_at"),
-        Index("idx_so_creator_outcome", "creator", "outcome"),
-    )
-
 
 class CreatorProfile(Base):
     """Creator reputation and history"""
