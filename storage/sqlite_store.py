@@ -20,7 +20,6 @@ from storage.models import (
     SignalHistory,
     TokenLifecycle,
     PerformanceMetrics,
-    SignalOutcome,
 )
 from config.settings import Settings
 
@@ -644,60 +643,6 @@ class SQLiteStore:
         except Exception as e:
             session.rollback()
             logger.error(f"Error creating performance metric: {e}")
-            raise
-        finally:
-            session.close()
-
-    # -------------------------------------------------------------------------
-    # SIGNAL OUTCOME OPERATIONS
-    # -------------------------------------------------------------------------
-    def create_or_update_signal_outcome(
-        self,
-        signal_id: str,
-        mint: str,
-        creator: Optional[str] = None,
-        outcome_data: Optional[Dict[str, Any]] = None,
-    ) -> SignalOutcome:
-        """Create or update signal outcome."""
-        session = self._get_session()
-        try:
-            outcome = (
-                session.query(SignalOutcome)
-                .filter(SignalOutcome.signal_id == signal_id)
-                .first()
-            )
-
-            payload = outcome_data or {}
-
-            if not outcome:
-                outcome = SignalOutcome(
-                    signal_id=signal_id,
-                    mint=mint,
-                    creator=creator,
-                )
-                session.add(outcome)
-
-            for key, value in {
-                "creator": creator,
-                "outcome": payload.get("outcome"),
-                "entry_price_sol": payload.get("entry_price_sol"),
-                "exit_price_sol": payload.get("exit_price_sol"),
-                "peak_price_sol": payload.get("peak_price_sol"),
-                "return_pct": payload.get("return_pct"),
-                "hold_duration_minutes": payload.get("hold_duration_minutes"),
-                "notes": payload.get("notes"),
-                "metadata_json": self._json(payload.get("metadata")),
-            }.items():
-                if value is not None and hasattr(outcome, key):
-                    setattr(outcome, key, value)
-
-            outcome.updated_at = datetime.utcnow()
-            session.commit()
-            session.refresh(outcome)
-            return outcome
-        except Exception as e:
-            session.rollback()
-            logger.error(f"Error creating/updating signal outcome: {e}")
             raise
         finally:
             session.close()

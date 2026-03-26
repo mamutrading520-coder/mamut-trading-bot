@@ -10,7 +10,6 @@ from storage.models import (
     SignalHistory,
     TokenLifecycle,
     PerformanceMetrics,
-    SignalOutcome,
 )
 from storage.sqlite_store import SQLiteStore
 
@@ -25,6 +24,5 @@ __all__ = [
     "SignalHistory",
     "TokenLifecycle",
     "PerformanceMetrics",
-    "SignalOutcome",
     "SQLiteStore",
 ]
