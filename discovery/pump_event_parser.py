@@ -21,6 +21,7 @@ class ParsedTokenEvent:
     bonding_curve: str = ""
     v_tokens_in_bonding_curve: int = 0
     v_sol_in_bonding_curve: float = 0.0
+    creator_resolved: bool = False
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary"""
@@ -29,6 +30,7 @@ class ParsedTokenEvent:
             "name": self.name,
             "symbol": self.symbol,
             "creator": self.creator,
+            "creator_resolved": self.creator_resolved,
             "signature": self.signature,
             "tx_signature": self.signature,
             "initial_sol": self.initial_sol,
@@ -53,7 +55,9 @@ class PumpEventParser:
             signature = data.get("signature")
             name = data.get("name") or "UNKNOWN"
             symbol = data.get("symbol") or "UNKNOWN"
-            creator = data.get("traderPublicKey") or data.get("creator") or "UNKNOWN"
+            creator_raw = data.get("traderPublicKey") or data.get("creator") or ""
+            creator = creator_raw or "UNKNOWN"
+            creator_resolved = creator not in {"", "UNKNOWN", "unknown"}
             uri = data.get("uri", "")
             timestamp = int(data.get("createdTimestamp") or data.get("timestamp") or 0)
             bonding_curve = data.get("bondingCurveKey") or data.get("bonding_curve") or ""
@@ -112,6 +116,7 @@ class PumpEventParser:
                 bonding_curve=bonding_curve,
                 v_tokens_in_bonding_curve=v_tokens_in_bonding_curve,
                 v_sol_in_bonding_curve=v_sol_in_bonding_curve,
+                creator_resolved=creator_resolved,
             )
             
             creator_display = creator[:8] if len(creator) >= 8 else creator
