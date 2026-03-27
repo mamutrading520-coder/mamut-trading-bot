@@ -261,7 +261,7 @@ class TrashFilterEngine:
             metadata_score_raw = token_data.get("metadata_score")
             metadata_flags = list(token_data.get("metadata_risk_flags", []) or [])
             social_count = int(token_data.get("social_count", 0) or 0)
-            metadata_json = token_data.get("metadata_json")
+            metadata_json = token_data.get("metadata_json") or token_data.get("uri_metadata")
             metadata_retrieved = bool(token_data.get("metadata_retrieved", False))
 
             reasons: List[str] = []
