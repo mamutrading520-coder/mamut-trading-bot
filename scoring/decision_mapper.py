@@ -72,6 +72,9 @@ class DecisionMapper:
             f"AggregateRisk={aggregate_risk:.2f}"
         )
 
+        if score_analysis.get("creator_resolved") is False:
+            reasoning += " | creator_resolved=False"
+
         if notes:
             reasoning += f" | Notes: {', '.join(notes)}"
 
@@ -98,6 +101,13 @@ class DecisionMapper:
             decision = "WARN"
         else:
             decision = "REJECT"
+
+        # Block SIGNAL_EARLY when creator identity could not be resolved
+        if decision == "SIGNAL_EARLY" and score_analysis.get("creator_resolved") is False:
+            decision = "MONITOR"
+            logger.debug(
+                f"Downgraded {symbol} SIGNAL_EARLY → MONITOR: creator_resolved=False"
+            )
 
         meta = DECISION_METADATA[decision]
 
