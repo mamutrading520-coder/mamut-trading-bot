@@ -47,7 +47,7 @@ class ScoreEngine:
         honeypot_risk = self._safe_float(token_data.get("honeypot_risk", 30))
 
         metadata_retrieved = bool(token_data.get("metadata_retrieved", False))
-        metadata_present = bool(token_data.get("metadata_json"))
+        metadata_present = bool(token_data.get("metadata_json") or token_data.get("uri_metadata"))
 
         score = 62.0
         notes = []
