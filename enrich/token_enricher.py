@@ -44,6 +44,8 @@ class EnrichedTokenData:
     freeze_authority: Optional[str] = None
     owner: Optional[str] = None
     owner_renounced: bool = False
+    supply_retrieved: bool = False
+    account_retrieved: bool = False
     metadata_retrieved: bool = False
     uri_metadata: Optional[Dict[str, Any]] = None
 
@@ -85,6 +87,8 @@ class EnrichedTokenData:
             "freeze_authority": self.freeze_authority,
             "owner": self.owner,
             "owner_renounced": self.owner_renounced,
+            "supply_retrieved": self.supply_retrieved,
+            "account_retrieved": self.account_retrieved,
             "metadata_retrieved": self.metadata_retrieved,
             "uri_metadata": self.uri_metadata,
             # Expose under the canonical key used by TrashFilterEngine and
@@ -290,16 +294,18 @@ class TokenEnricher:
             if token_metadata:
                 enriched.decimals = token_metadata.get("decimals", 6)
                 enriched.total_supply = token_metadata.get("amount", 0)
-                enriched.metadata_retrieved = True
+                enriched.supply_retrieved = True
 
             if account_info:
                 enriched.mint_authority = account_info.get("mint_authority")
                 enriched.freeze_authority = account_info.get("freeze_authority")
                 enriched.owner = account_info.get("owner")
                 enriched.owner_renounced = account_info.get("mint_authority") is None
+                enriched.account_retrieved = True
 
             if uri_metadata:
                 enriched.uri_metadata = uri_metadata
+                enriched.metadata_retrieved = True
 
             metadata_input = self._build_metadata_input(token_data, uri_metadata)
             metadata_analysis = await self.metadata_analyzer.analyze(metadata_input)
