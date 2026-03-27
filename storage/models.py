@@ -250,6 +250,7 @@ class CreatorProfile(Base):
     # Timing
     wallet_age_days = Column(Integer, default=0)
     first_token_date = Column(DateTime)
+    last_token_date = Column(DateTime)
 
     # Metadata
     notes = Column(Text)
