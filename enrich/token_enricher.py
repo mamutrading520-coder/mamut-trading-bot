@@ -64,6 +64,8 @@ class EnrichedTokenData:
     holder_concentration_score: float = 0.0
     holder_distribution_score: float = 0.0
     holder_risk_flags: list[str] = field(default_factory=list)
+    holder_count: int = 0
+    creator_balance: float = 0.0
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
@@ -107,6 +109,8 @@ class EnrichedTokenData:
             "holder_concentration_score": self.holder_concentration_score,
             "holder_distribution_score": self.holder_distribution_score,
             "holder_risk_flags": self.holder_risk_flags,
+            "holder_count": self.holder_count,
+            "creator_balance": self.creator_balance,
         }
 
 
@@ -328,6 +332,9 @@ class TokenEnricher:
                 holder_analysis.get("holder_distribution_score", 0.0) or 0.0
             )
             enriched.holder_risk_flags = list(holder_analysis.get("holder_risk_flags", []) or [])
+            enriched.holder_count = int(holder_analysis.get("holder_count", 0) or 0)
+            creator_hold_pct = float(holder_analysis.get("creator_hold_percentage", 0.0) or 0.0)
+            enriched.creator_balance = (creator_hold_pct / 100.0) * enriched.total_supply
 
             self.enriched_count += 1
             logger.debug(
