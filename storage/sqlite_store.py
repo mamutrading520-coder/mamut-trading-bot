@@ -438,8 +438,13 @@ class SQLiteStore:
         finally:
             session.close()
 
-    def update_creator_profile(self, creator: str, updates: Dict[str, Any]) -> Optional[CreatorProfile]:
-        """Update creator profile."""
+    def update_creator_profile(self, creator: str, updates: Dict[str, Any]) -> CreatorProfile:
+        """Update creator profile, creating it if it does not exist (upsert)."""
+        # Alias: callers may send total_tokens_created instead of total_tokens
+        if "total_tokens_created" in updates and "total_tokens" not in updates:
+            updates = updates.copy()
+            updates["total_tokens"] = updates.pop("total_tokens_created")
+
         session = self._get_session()
         try:
             profile = (
@@ -448,10 +453,13 @@ class SQLiteStore:
                 .first()
             )
             if not profile:
-                return None
-            for key, value in updates.items():
-                if hasattr(profile, key):
-                    setattr(profile, key, value)
+                filtered = {k: v for k, v in updates.items() if hasattr(CreatorProfile, k)}
+                profile = CreatorProfile(creator=creator, **filtered)
+                session.add(profile)
+            else:
+                for key, value in updates.items():
+                    if hasattr(profile, key):
+                        setattr(profile, key, value)
             profile.updated_at = datetime.utcnow()
             session.commit()
             session.refresh(profile)
@@ -465,6 +473,11 @@ class SQLiteStore:
 
     def upsert_creator_profile(self, creator: str, updates: Dict[str, Any]) -> CreatorProfile:
         """Create or update creator profile."""
+        # Alias: callers may send total_tokens_created instead of total_tokens
+        if "total_tokens_created" in updates and "total_tokens" not in updates:
+            updates = updates.copy()
+            updates["total_tokens"] = updates.pop("total_tokens_created")
+
         session = self._get_session()
         try:
             profile = (
