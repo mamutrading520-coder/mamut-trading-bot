@@ -63,7 +63,7 @@ class CreatorProfiler:
                 analysis["wallet_age_days"] = 0
                 return 30.0, analysis
             
-            analysis["total_tokens"] = profile.total_tokens_created or 0
+            analysis["total_tokens"] = profile.total_tokens or 0
             analysis["failed_tokens"] = profile.failed_tokens or 0
             analysis["successful_tokens"] = profile.successful_tokens or 0
             analysis["average_score"] = profile.average_score or 0.0
@@ -135,13 +135,13 @@ class CreatorProfiler:
             
             # Store or update creator profile
             profile_updates = {
-                "total_tokens_created": analysis["total_tokens"] + 1,
+                "total_tokens": analysis["total_tokens"] + 1,
                 "wallet_age_days": analysis["wallet_age_days"],
                 "risk_level": self._get_risk_level(risk_score),
                 "last_token_date": datetime.utcnow(),
             }
             
-            self.store.update_creator_profile(creator, profile_updates)
+            self.store.upsert_creator_profile(creator, profile_updates)
             
             self.analyzed_count += 1
             logger.debug(f"Profiled creator {creator[:8]}... risk={risk_score:.1f}")

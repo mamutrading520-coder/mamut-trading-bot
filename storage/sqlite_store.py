@@ -463,6 +463,32 @@ class SQLiteStore:
         finally:
             session.close()
 
+    def upsert_creator_profile(self, creator: str, updates: Dict[str, Any]) -> CreatorProfile:
+        """Create or update creator profile."""
+        session = self._get_session()
+        try:
+            profile = (
+                session.query(CreatorProfile)
+                .filter(CreatorProfile.creator == creator)
+                .first()
+            )
+            if not profile:
+                profile = CreatorProfile(creator=creator)
+                session.add(profile)
+            for key, value in updates.items():
+                if hasattr(profile, key):
+                    setattr(profile, key, value)
+            profile.updated_at = datetime.utcnow()
+            session.commit()
+            session.refresh(profile)
+            return profile
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Error upserting creator profile: {e}")
+            raise
+        finally:
+            session.close()
+
     # -------------------------------------------------------------------------
     # AUDIT OPERATIONS
     # -------------------------------------------------------------------------
