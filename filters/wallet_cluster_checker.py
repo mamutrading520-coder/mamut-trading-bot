@@ -12,6 +12,8 @@ class WalletClusterChecker:
     """
 
     def __init__(self) -> None:
+        self.analyzed_count = 0
+        self.high_risk_count = 0
         logger.debug("WalletClusterChecker initialized")
 
     async def analyze(self, token_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -82,6 +84,7 @@ class WalletClusterChecker:
             cluster_risk_score = min(100.0, float(risk_score))
 
             result = {
+                "score": cluster_risk_score,
                 "wallet_cluster_risk_score": cluster_risk_score,
                 "wallet_cluster_risk_level": self._classify_risk(cluster_risk_score),
                 "wallet_cluster_flags": risk_flags,
@@ -89,6 +92,10 @@ class WalletClusterChecker:
                 "is_wallet_cluster_medium_risk": 35 <= cluster_risk_score < 60,
                 "wallet_cluster_summary": self._build_summary(cluster_risk_score, risk_flags),
             }
+
+            self.analyzed_count += 1
+            if cluster_risk_score >= 60:
+                self.high_risk_count += 1
 
             logger.debug(
                 f"Wallet cluster analysis complete | risk={cluster_risk_score} | flags={risk_flags}"
@@ -129,3 +136,11 @@ class WalletClusterChecker:
             return float(value or 0.0)
         except Exception:
             return 0.0
+
+    def get_stats(self) -> dict:
+        """Get checker statistics."""
+        return {
+            "analyzed_count": self.analyzed_count,
+            "high_risk_count": self.high_risk_count,
+            "high_risk_rate": self.high_risk_count / self.analyzed_count if self.analyzed_count > 0 else 0,
+        }

@@ -12,10 +12,12 @@ from config.thresholds import (
     CREATOR_RISK_THRESHOLDS,
     CONCENTRATION_THRESHOLDS,
     AUTHORITY_RISK_THRESHOLDS,
+    WALLET_CLUSTER_THRESHOLDS,
 )
 from storage.sqlite_store import SQLiteStore
 from core.event_bus import Event, get_event_bus
 from filters.honeypot_detector import HoneypotDetector
+from filters.wallet_cluster_checker import WalletClusterChecker
 
 logger = setup_logger("TrashFilterEngine")
 
@@ -29,6 +31,7 @@ class TrashFilterEngine:
         self.event_bus = get_event_bus()
 
         self.honeypot_detector = HoneypotDetector(settings)
+        self.wallet_cluster_checker = WalletClusterChecker()
 
         self.passed = 0
         self.rejected = 0
@@ -316,14 +319,16 @@ class TrashFilterEngine:
         concentration_risk: Dict[str, Any],
         metadata_risk: Dict[str, Any],
         honeypot_risk: Dict[str, Any],
+        wallet_cluster_risk: Dict[str, Any],
     ) -> Dict[str, Any]:
         """Combine component risks into one aggregate risk model."""
         weighted_score = (
-            authority_risk["score"] * 0.28
-            + creator_risk["score"] * 0.20
-            + concentration_risk["score"] * 0.18
-            + metadata_risk["score"] * 0.12
-            + honeypot_risk["risk_score"] * 0.22
+            authority_risk["score"] * 0.25
+            + creator_risk["score"] * 0.18
+            + concentration_risk["score"] * 0.15
+            + metadata_risk["score"] * 0.10
+            + honeypot_risk["risk_score"] * 0.20
+            + wallet_cluster_risk.get("score", 0.0) * 0.12
         )
 
         weighted_score = round(max(0.0, min(100.0, weighted_score)), 2)
@@ -334,6 +339,7 @@ class TrashFilterEngine:
             + concentration_risk.get("reasons", [])
             + metadata_risk.get("reasons", [])
             + honeypot_risk.get("reasons", [])
+            + wallet_cluster_risk.get("wallet_cluster_flags", [])
         )
 
         warnings = (
@@ -367,6 +373,7 @@ class TrashFilterEngine:
         concentration_risk: Dict[str, Any],
         metadata_risk: Dict[str, Any],
         honeypot_risk: Dict[str, Any],
+        wallet_cluster_risk: Dict[str, Any],
         aggregate: Dict[str, Any],
     ) -> Tuple[bool, List[str]]:
         """Determine whether the token should be rejected by hard/aggregate rules."""
@@ -394,6 +401,9 @@ class TrashFilterEngine:
         ):
             rejection_reasons.append("Exceeds metadata risk threshold")
 
+        if wallet_cluster_risk.get("score", 0.0) > WALLET_CLUSTER_THRESHOLDS.get("max_wallet_cluster_risk", 80):
+            rejection_reasons.append("Extreme wallet cluster concentration detected")
+
         if aggregate["risk_score"] > TRASH_FILTER_THRESHOLDS.get("max_total_risk", 75):
             rejection_reasons.append("Exceeds aggregate trash-filter risk threshold")
 
@@ -414,7 +424,14 @@ class TrashFilterEngine:
             creator_risk = self._calculate_creator_risk(token_data)
             concentration_risk = self._calculate_concentration_risk(token_data)
             metadata_risk = self._calculate_metadata_risk(token_data)
-            honeypot_risk = await self.honeypot_detector.analyze(token_data)
+            wallet_cluster_risk = await self.wallet_cluster_checker.analyze(token_data)
+
+            # Normalize wallet cluster score (0-100) to 0-1 scale for HoneypotDetector
+            enriched_data = {
+                **token_data,
+                "wallet_cluster_score": wallet_cluster_risk.get("wallet_cluster_risk_score", 0.0) / 100.0,
+            }
+            honeypot_risk = await self.honeypot_detector.analyze(enriched_data)
 
             aggregate = self._combine_risks(
                 authority_risk=authority_risk,
@@ -422,6 +439,7 @@ class TrashFilterEngine:
                 concentration_risk=concentration_risk,
                 metadata_risk=metadata_risk,
                 honeypot_risk=honeypot_risk,
+                wallet_cluster_risk=wallet_cluster_risk,
             )
 
             reject, rejection_reasons = self._should_reject(
@@ -430,6 +448,7 @@ class TrashFilterEngine:
                 concentration_risk=concentration_risk,
                 metadata_risk=metadata_risk,
                 honeypot_risk=honeypot_risk,
+                wallet_cluster_risk=wallet_cluster_risk,
                 aggregate=aggregate,
             )
 
@@ -439,6 +458,7 @@ class TrashFilterEngine:
                 "concentration_risk": concentration_risk,
                 "metadata_risk": metadata_risk,
                 "honeypot_risk": honeypot_risk,
+                "wallet_cluster_risk": wallet_cluster_risk,
             }
 
             if reject:
@@ -482,6 +502,7 @@ class TrashFilterEngine:
                     "concentration_risk": concentration_risk["score"],
                     "metadata_risk": metadata_risk["score"],
                     "honeypot_risk": honeypot_risk["risk_score"],
+                    "wallet_cluster_risk": wallet_cluster_risk.get("score", 0.0),
                 },
                 source="TrashFilterEngine",
                 timestamp=datetime.utcnow(),
@@ -490,7 +511,8 @@ class TrashFilterEngine:
             await self.event_bus.emit(passed_event)
             logger.info(
                 f"[PASSED FILTERS] {mint[:8]}... | total_risk={aggregate['risk_score']:.1f} "
-                f"| auth={authority_risk['score']:.0f} creator={creator_risk['score']:.0f}"
+                f"| auth={authority_risk['score']:.0f} creator={creator_risk['score']:.0f} "
+                f"| cluster={wallet_cluster_risk.get('score', 0.0):.0f}"
             )
             return "PASSED"
 
@@ -506,4 +528,5 @@ class TrashFilterEngine:
             "rejected": self.rejected,
             "pass_rate": (self.passed / total * 100) if total > 0 else 0,
             "honeypot_detector": self.honeypot_detector.get_stats(),
+            "wallet_cluster_checker": self.wallet_cluster_checker.get_stats(),
         }

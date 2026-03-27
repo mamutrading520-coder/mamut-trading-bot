@@ -177,6 +177,11 @@ RISK_SCORE_MULTIPLIERS = {
     "multiple_failures": 1.4,
 }
 
+# Wallet Cluster Risk Thresholds
+WALLET_CLUSTER_THRESHOLDS = {
+    "max_wallet_cluster_risk": 80,
+}
+
 # Token Lock Manager Config
 TOKEN_LOCK_CONFIG = {
     "max_concurrent_locks": 100,
