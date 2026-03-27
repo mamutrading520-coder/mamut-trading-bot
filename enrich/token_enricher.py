@@ -87,6 +87,10 @@ class EnrichedTokenData:
             "owner_renounced": self.owner_renounced,
             "metadata_retrieved": self.metadata_retrieved,
             "uri_metadata": self.uri_metadata,
+            # Expose under the canonical key used by TrashFilterEngine and
+            # SQLiteStore.update_token_enrichment so both can detect that
+            # off-chain metadata has been retrieved.
+            "metadata_json": self.uri_metadata,
             "metadata_analysis": self.metadata_analysis,
             "metadata_score": self.metadata_score,
             "metadata_risk_flags": self.metadata_risk_flags,
@@ -309,7 +313,7 @@ class TokenEnricher:
             enriched.has_discord = bool(metadata_analysis.get("has_discord", False))
             enriched.social_count = int(metadata_analysis.get("social_count", 0) or 0)
 
-            holder_analysis = await self.holder_analyzer.analyze(token_data)
+            holder_analysis = await self.holder_analyzer.analyze(enriched.to_dict())
             enriched.holder_analysis = holder_analysis
             enriched.holder_concentration_score = float(
                 holder_analysis.get("holder_concentration_score", 0.0) or 0.0
