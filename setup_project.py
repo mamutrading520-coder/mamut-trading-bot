@@ -34,7 +34,7 @@ ALERT_ENABLED=false
 
 def create_requirements():
     print("Creating requirements.txt...")
-    req = """aiohttp==3.11.18
+    req = """aiohttp==3.13.3
 websockets==13.1
 sqlalchemy==2.0.40
 pydantic==2.10.6
