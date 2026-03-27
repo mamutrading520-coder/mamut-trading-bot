@@ -152,6 +152,7 @@ class CreatorProfiler:
                 "risk_score": risk_score,
                 "risk_level": self._get_risk_level(risk_score),
                 "analysis": analysis,
+                "creator_resolved": bool(creator),
                 "timestamp": datetime.utcnow().isoformat(),
             }
             
@@ -161,6 +162,7 @@ class CreatorProfiler:
             return {
                 "creator": token_data.get("creator"),
                 "error": str(e),
+                "creator_resolved": False,
             }
     
     def _get_risk_level(self, risk_score: float) -> str:
