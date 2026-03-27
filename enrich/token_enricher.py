@@ -14,6 +14,7 @@ from core.event_bus import Event, get_event_bus
 from config.settings import Settings
 from config.thresholds import TIMEOUTS
 from enrich.metadata_analyzer import MetadataAnalyzer
+from enrich.holder_analyzer import HolderAnalyzer
 
 logger = setup_logger("TokenEnricher")
 
@@ -55,6 +56,12 @@ class EnrichedTokenData:
     has_telegram: bool = False
     social_count: int = 0
 
+    # Holder analysis
+    holder_analysis: Dict[str, Any] = field(default_factory=dict)
+    holder_concentration_score: float = 0.0
+    holder_distribution_score: float = 0.0
+    holder_risk_flags: list[str] = field(default_factory=list)
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
         return {
@@ -86,6 +93,10 @@ class EnrichedTokenData:
             "has_twitter": self.has_twitter,
             "has_telegram": self.has_telegram,
             "social_count": self.social_count,
+            "holder_analysis": self.holder_analysis,
+            "holder_concentration_score": self.holder_concentration_score,
+            "holder_distribution_score": self.holder_distribution_score,
+            "holder_risk_flags": self.holder_risk_flags,
         }
 
 
@@ -103,6 +114,7 @@ class TokenEnricher:
 
         self.http_client: Optional[httpx.AsyncClient] = None
         self.metadata_analyzer = MetadataAnalyzer()
+        self.holder_analyzer = HolderAnalyzer()
 
     async def _get_http_client(self) -> httpx.AsyncClient:
         """Get or create HTTP client."""
@@ -287,10 +299,21 @@ class TokenEnricher:
             enriched.has_telegram = bool(metadata_analysis.get("has_telegram", False))
             enriched.social_count = int(metadata_analysis.get("social_count", 0) or 0)
 
+            holder_analysis = await self.holder_analyzer.analyze(token_data)
+            enriched.holder_analysis = holder_analysis
+            enriched.holder_concentration_score = float(
+                holder_analysis.get("holder_concentration_score", 0.0) or 0.0
+            )
+            enriched.holder_distribution_score = float(
+                holder_analysis.get("holder_distribution_score", 0.0) or 0.0
+            )
+            enriched.holder_risk_flags = list(holder_analysis.get("holder_risk_flags", []) or [])
+
             self.enriched_count += 1
             logger.debug(
                 f"Enriched token: {enriched.symbol} ({mint[:8]}...) | "
-                f"metadata_score={enriched.metadata_score}"
+                f"metadata_score={enriched.metadata_score} | "
+                f"holder_distribution={enriched.holder_distribution_score}"
             )
             return enriched
 
