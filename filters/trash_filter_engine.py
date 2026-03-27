@@ -102,8 +102,24 @@ class TrashFilterEngine:
 
     def _calculate_creator_risk(self, token_data: Dict[str, Any]) -> Dict[str, Any]:
         """Calculate creator reputation risk score."""
+        creator = token_data.get("creator")
+        creator_resolved = token_data.get("creator_resolved", True)
+
+        if not creator_resolved or not creator or (isinstance(creator, str) and creator.upper() == "UNKNOWN"):
+            return {
+                "score": 50.0,
+                "creator": creator or "unknown",
+                "is_new": False,
+                "is_blacklisted": False,
+                "is_trusted": False,
+                "total_tokens": 0,
+                "successful_tokens": 0,
+                "wallet_age_days": None,
+                "reasons": ["Creator no resuelto"],
+                "warnings": ["Creator identity unavailable"],
+            }
+
         try:
-            creator = token_data.get("creator", "unknown")
             creator_profile = self.store.get_creator_profile(creator)
 
             risk_score = 55.0
@@ -171,7 +187,7 @@ class TrashFilterEngine:
             logger.debug(f"Error calculating creator risk: {e}")
             return {
                 "score": 50.0,
-                "creator": token_data.get("creator", "unknown"),
+                "creator": creator,
                 "is_new": True,
                 "is_blacklisted": False,
                 "is_trusted": False,
