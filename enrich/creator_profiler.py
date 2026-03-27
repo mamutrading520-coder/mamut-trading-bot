@@ -192,10 +192,17 @@ class CreatorProfiler:
                 logger.debug(f"Failed to profile creator")
                 return False
             
+            # Merge enriched token data with creator profile so downstream
+            # consumers (e.g. TrashFilterEngine) receive all required fields.
+            # Creator profile keys override only their own keys; all enriched
+            # fields (mint_authority, freeze_authority, metadata_score, …) are
+            # preserved as-is.
+            merged_data = {**event.data, **profile}
+
             # Create and emit profile event
             profile_event = Event(
                 event_type="CreatorProfiled",
-                data=profile,
+                data=merged_data,
                 source="CreatorProfiler",
                 timestamp=datetime.utcnow()
             )

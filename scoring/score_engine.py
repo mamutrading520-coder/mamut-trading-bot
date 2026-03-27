@@ -36,7 +36,7 @@ class ScoreEngine:
         - breakdown
         """
         market_cap_sol = self._safe_float(token_data.get("market_cap_sol", 0))
-        metadata_score = self._safe_float(token_data.get("metadata_score", 0))
+        metadata_score = max(0.0, min(100.0, self._safe_float(token_data.get("metadata_score", 0))))
         social_count = int(token_data.get("social_count", 0) or 0)
 
         aggregate_risk = self._safe_float(token_data.get("aggregate_risk_score", 35))
