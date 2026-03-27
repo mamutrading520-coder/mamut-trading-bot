@@ -6,7 +6,8 @@
 # ============================================================
 
 param(
-    [switch]$Force   # Fuerza reinstalacion si el entorno ya existe
+    [switch]$Force,  # Fuerza reinstalacion si el entorno ya existe
+    [switch]$Clean   # Limpieza completa: elimina cache, .pyc, pip cache y entorno virtual
 )
 
 $ErrorActionPreference = "Stop"
@@ -46,6 +47,50 @@ Write-Host "  Entorno: Windows PowerShell" -ForegroundColor White
 Write-Host "  Directorio: $PSScriptRoot" -ForegroundColor White
 
 Set-Location $PSScriptRoot
+
+# ------------------------------------------------------------------
+# -Clean activa tambien -Force
+if ($Clean) { $Force = $true }
+
+if ($Clean) {
+    Write-Step "PRE  Limpieza completa del entorno..."
+
+    # Eliminar archivos __pycache__ y .pyc recursivamente
+    $pycacheDirs = Get-ChildItem -Path $PSScriptRoot -Recurse -Directory -Filter "__pycache__" -ErrorAction SilentlyContinue |
+                    Where-Object { $_.FullName -notmatch "\\\.venv\\" }
+    foreach ($dir in $pycacheDirs) {
+        Remove-Item -Recurse -Force $dir.FullName -ErrorAction SilentlyContinue
+    }
+    $pycCount = $pycacheDirs.Count
+    Write-OK "Eliminados $pycCount directorios __pycache__"
+
+    $pycFiles = Get-ChildItem -Path $PSScriptRoot -Recurse -File -Include "*.pyc","*.pyo" -ErrorAction SilentlyContinue |
+                Where-Object { $_.FullName -notmatch "\\\.venv\\" }
+    foreach ($f in $pycFiles) {
+        Remove-Item -Force $f.FullName -ErrorAction SilentlyContinue
+    }
+    Write-OK "Eliminados $($pycFiles.Count) archivos .pyc/.pyo"
+
+    # Limpiar cache de pip (fuera del venv)
+    try {
+        $pipCacheDir = & pip cache dir 2>&1
+        if ($LASTEXITCODE -eq 0 -and (Test-Path $pipCacheDir)) {
+            & pip cache purge 2>&1 | Out-Null
+            Write-OK "Cache de pip limpiado"
+        }
+    } catch {
+        Write-Warn "No se pudo limpiar el cache de pip del sistema (opcional)"
+    }
+
+    # Eliminar base de datos temporal si existe
+    $tempDb = Join-Path $PSScriptRoot "mamut.db"
+    if (Test-Path $tempDb) {
+        Remove-Item -Force $tempDb
+        Write-OK "Base de datos mamut.db eliminada"
+    }
+
+    Write-OK "Limpieza completada. Procediendo con instalacion fresca..."
+}
 
 # ------------------------------------------------------------------
 Write-Step "1/6  Verificando Python..."
@@ -100,8 +145,15 @@ if (-not (Test-Path $pip)) {
 }
 
 & $pip install --upgrade pip --quiet
-& $pip install -r requirements.txt --quiet
-Write-OK "Dependencias instaladas desde requirements.txt"
+
+if ($Clean) {
+    # Instalacion limpia: sin usar cache local de pip
+    & $pip install --no-cache-dir -r requirements.txt
+    Write-OK "Dependencias instaladas sin cache (instalacion limpia)"
+} else {
+    & $pip install -r requirements.txt --quiet
+    Write-OK "Dependencias instaladas desde requirements.txt"
+}
 
 # ------------------------------------------------------------------
 Write-Step "4/6  Creando directorios necesarios..."
@@ -182,6 +234,10 @@ Write-Host "    .\run.ps1 -Mode bot        -> Iniciar el bot" -ForegroundColor G
 Write-Host "    .\run.ps1 -Mode monitor    -> Monitor en vivo" -ForegroundColor Green
 Write-Host "    .\run.ps1 -Mode db         -> Revisar base de datos" -ForegroundColor Green
 Write-Host "    .\test_local.ps1           -> Pruebas locales" -ForegroundColor Green
+Write-Host ""
+Write-Host "  Para reinstalar dependencias:" -ForegroundColor White
+Write-Host "    .\setup.ps1 -Force         -> Recrear entorno virtual" -ForegroundColor Green
+Write-Host "    .\setup.ps1 -Clean         -> Limpiar TODO cache y reinstalar" -ForegroundColor Green
 Write-Host ""
 Write-Host "  NOTA: Edita .env con tus valores antes de iniciar el bot." -ForegroundColor DarkYellow
 Write-Host ""
