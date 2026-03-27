@@ -34,14 +34,14 @@ ALERT_ENABLED=false
 
 def create_requirements():
     print("Creating requirements.txt...")
-    req = """aiohttp==3.9.1
-websockets==12.0
-sqlalchemy==2.0.23
-pydantic==2.5.0
-pydantic-settings==2.1.0
-python-dotenv==1.0.0
-httpx==0.25.2
-loguru==0.7.2
+    req = """aiohttp==3.13.3
+websockets==13.1
+sqlalchemy==2.0.40
+pydantic==2.10.6
+pydantic-settings==2.7.1
+python-dotenv==1.0.1
+httpx==0.28.1
+loguru==0.7.3
 """
     (ROOT / "requirements.txt").write_text(req, encoding='utf-8')
 

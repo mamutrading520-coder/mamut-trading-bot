@@ -8,6 +8,7 @@ from config.settings import Settings
 from core.event_bus import Event, get_event_bus
 from discovery.pump_event_parser import PumpEventParser, ParsedTokenEvent
 import websockets
+from websockets.legacy.client import WebSocketClientProtocol
 
 logger = setup_logger("PumpListener")
 
@@ -24,7 +25,7 @@ class PumpListener:
         self.initial_reconnect_delay = settings.pump_reconnect_delay
         self.max_retries = settings.pump_max_retries
         
-        self.ws: Optional[websockets.WebSocketClientProtocol] = None
+        self.ws: Optional[WebSocketClientProtocol] = None
         self.running = False
         self.ws_connected = False
         
