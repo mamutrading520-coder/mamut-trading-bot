@@ -51,6 +51,13 @@ class MetadataAnalyzer:
     # preventing false positives from domains like "nottwitter.com".
     TWITTER_DOMAIN_RE = re.compile(r"(?:https?://(?:www\.)?|[/@])twitter\.com")
     X_COM_DOMAIN_RE = re.compile(r"(?:https?://(?:www\.)?|[/@])x\.com")
+    DISCORD_DOMAIN_RE = re.compile(r"(?:https?://(?:www\.)?|[/@])discord\.(?:com|gg)")
+    # Social-platform domains that should NOT count as a generic website.
+    SOCIAL_DOMAIN_RE = re.compile(
+        r"https?://(?:www\.)?"
+        r"(?:twitter\.com|x\.com|t\.me|telegram\.(?:me|org)|discord\.(?:com|gg))",
+        re.IGNORECASE,
+    )
 
     def __init__(self) -> None:
         logger.debug("MetadataAnalyzer initialized")
@@ -65,18 +72,50 @@ class MetadataAnalyzer:
         - description
         - website
         - twitter
+        - x             (alias for twitter)
         - telegram
+        - discord
+        - external_url  (alias for website)
+        - links         (dict or list containing any of the above channel keys)
         """
         try:
             name = self._safe_text(token_data.get("name"))
             symbol = self._safe_text(token_data.get("symbol"))
             description = self._safe_text(token_data.get("description"))
-            website = self._safe_text(token_data.get("website"))
-            twitter = self._safe_text(token_data.get("twitter"))
-            telegram = self._safe_text(token_data.get("telegram"))
+
+            # Resolve channel values, accepting aliases and a nested links container.
+            links_container = token_data.get("links") or {}
+            if not isinstance(links_container, dict):
+                logger.warning(
+                    f"Unexpected type for 'links' container: {type(links_container).__name__}; ignoring."
+                )
+                links_container = {}
+
+            website = self._safe_text(
+                token_data.get("website")
+                or token_data.get("external_url")
+                or links_container.get("website")
+                or links_container.get("external_url")
+            )
+            twitter = self._safe_text(
+                token_data.get("twitter")
+                or token_data.get("x")
+                or links_container.get("twitter")
+                or links_container.get("x")
+            )
+            telegram = self._safe_text(
+                token_data.get("telegram")
+                or links_container.get("telegram")
+            )
+            discord = self._safe_text(
+                token_data.get("discord")
+                or links_container.get("discord")
+            )
 
             combined_text = " ".join(
-                part for part in [name, symbol, description, website, twitter, telegram] if part
+                part
+                for part in [name, symbol, description, website, twitter, telegram, discord]
+                if part
             ).strip()
             combined_lower = combined_text.lower()
 
@@ -90,19 +129,34 @@ class MetadataAnalyzer:
                 combined_lower, self.POSITIVE_KEYWORDS
             )
 
-            has_website = bool(website) or any("http" in u.lower() for u in urls_found)
+            has_website = bool(website) or any(
+                "http" in u.lower() and not self.SOCIAL_DOMAIN_RE.match(u)
+                for u in urls_found
+            )
             has_twitter = (
                 bool(twitter)
                 or self.TWITTER_DOMAIN_RE.search(combined_lower) is not None
                 or self.X_COM_DOMAIN_RE.search(combined_lower) is not None
             )
             has_telegram = bool(telegram) or "t.me/" in combined_lower
+            has_discord = (
+                bool(discord)
+                or self.DISCORD_DOMAIN_RE.search(combined_lower) is not None
+            )
+
+            # Build a deduplicated set of present channels for social_count.
+            channel_flags = {
+                "website": has_website,
+                "twitter": has_twitter,
+                "telegram": has_telegram,
+                "discord": has_discord,
+            }
+            normalized_links = sorted(ch for ch, present in channel_flags.items() if present)
+            social_count = len(normalized_links)
 
             symbol_quality = self._score_symbol_quality(symbol)
             name_quality = self._score_name_quality(name)
             description_quality = self._score_description_quality(description)
-
-            social_count = sum([has_website, has_twitter, has_telegram])
 
             metadata_score = (
                 symbol_quality
@@ -134,7 +188,9 @@ class MetadataAnalyzer:
                 "has_website": has_website,
                 "has_twitter": has_twitter,
                 "has_telegram": has_telegram,
+                "has_discord": has_discord,
                 "social_count": social_count,
+                "normalized_links": normalized_links,
                 "urls_found": urls_found,
                 "handles_found": handles_found,
                 "suspicious_matches": suspicious_matches,
@@ -164,7 +220,9 @@ class MetadataAnalyzer:
                 "has_website": False,
                 "has_twitter": False,
                 "has_telegram": False,
+                "has_discord": False,
                 "social_count": 0,
+                "normalized_links": [],
                 "urls_found": [],
                 "handles_found": [],
                 "suspicious_matches": [],

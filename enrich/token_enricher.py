@@ -53,6 +53,7 @@ class EnrichedTokenData:
     has_website: bool = False
     has_twitter: bool = False
     has_telegram: bool = False
+    has_discord: bool = False
     social_count: int = 0
 
     def to_dict(self) -> Dict[str, Any]:
@@ -85,6 +86,7 @@ class EnrichedTokenData:
             "has_website": self.has_website,
             "has_twitter": self.has_twitter,
             "has_telegram": self.has_telegram,
+            "has_discord": self.has_discord,
             "social_count": self.social_count,
         }
 
@@ -205,9 +207,12 @@ class TokenEnricher:
                 "description": metadata.get("description"),
                 "image": metadata.get("image"),
                 "website": metadata.get("website"),
+                "external_url": metadata.get("external_url"),
                 "twitter": metadata.get("twitter"),
+                "x": metadata.get("x"),
                 "telegram": metadata.get("telegram"),
                 "discord": metadata.get("discord"),
+                "links": metadata.get("links"),
             }
 
         except asyncio.TimeoutError:
@@ -230,8 +235,12 @@ class TokenEnricher:
             "symbol": uri_metadata.get("symbol") or token_data.get("symbol"),
             "description": uri_metadata.get("description"),
             "website": uri_metadata.get("website"),
+            "external_url": uri_metadata.get("external_url"),
             "twitter": uri_metadata.get("twitter"),
+            "x": uri_metadata.get("x"),
             "telegram": uri_metadata.get("telegram"),
+            "discord": uri_metadata.get("discord"),
+            "links": uri_metadata.get("links"),
         }
 
     async def enrich(self, token_data: Dict[str, Any]) -> Optional[EnrichedTokenData]:
@@ -285,6 +294,7 @@ class TokenEnricher:
             enriched.has_website = bool(metadata_analysis.get("has_website", False))
             enriched.has_twitter = bool(metadata_analysis.get("has_twitter", False))
             enriched.has_telegram = bool(metadata_analysis.get("has_telegram", False))
+            enriched.has_discord = bool(metadata_analysis.get("has_discord", False))
             enriched.social_count = int(metadata_analysis.get("social_count", 0) or 0)
 
             self.enriched_count += 1
