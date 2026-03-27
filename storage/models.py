@@ -247,9 +247,13 @@ class CreatorProfile(Base):
     is_trusted = Column(Boolean, default=False)
     is_blacklisted = Column(Boolean, default=False)
 
+    # Risk level
+    risk_level = Column(String(50))
+
     # Timing
     wallet_age_days = Column(Integer, default=0)
     first_token_date = Column(DateTime)
+    last_token_date = Column(DateTime)
 
     # Metadata
     notes = Column(Text)
