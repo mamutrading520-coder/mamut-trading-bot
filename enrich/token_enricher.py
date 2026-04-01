@@ -76,6 +76,7 @@ class EnrichedTokenData:
     creator_hold_percentage: float = 0.0
     fresh_wallet_ratio: float = 0.0
     sniper_wallets_detected: int = 0
+    creator_resolved: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
@@ -127,6 +128,7 @@ class EnrichedTokenData:
             "creator_hold_percentage": self.creator_hold_percentage,
             "fresh_wallet_ratio": self.fresh_wallet_ratio,
             "sniper_wallets_detected": self.sniper_wallets_detected,
+            "creator_resolved": self.creator_resolved,
         }
 
 
@@ -394,7 +396,8 @@ class TokenEnricher:
                 v_sol_in_bonding_curve=token_data.get("v_sol_in_bonding_curve"),
                 market_cap_sol=token_data.get("market_cap_sol"),
                 uri=token_data.get("uri"),
-                tx_signature=token_data.get("tx_signature"),
+                tx_signature=token_data.get("tx_signature") or token_data.get("signature"),
+                creator_resolved=bool(token_data.get("creator_resolved", False)),
             )
 
             token_metadata, account_info, uri_metadata, largest_accounts = await asyncio.gather(
