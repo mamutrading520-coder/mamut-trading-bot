@@ -37,7 +37,7 @@ class EnrichedTokenData:
     uri: str
     tx_signature: str
 
-    # On-chain enrichment
+    # On-chain enrichment (supply + account data)
     decimals: int = 6
     total_supply: int = 0
     mint_authority: Optional[str] = None
@@ -46,6 +46,8 @@ class EnrichedTokenData:
     owner_renounced: bool = False
     supply_retrieved: bool = False
     account_retrieved: bool = False
+
+    # Off-chain / URI metadata retrieval
     metadata_retrieved: bool = False
     uri_metadata: Optional[Dict[str, Any]] = None
 
