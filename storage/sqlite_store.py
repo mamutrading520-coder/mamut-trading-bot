@@ -3,23 +3,23 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Any, Dict, List, Optional, Type
 
-from sqlalchemy import create_engine, func, and_
-from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy import and_, create_engine, func
+from sqlalchemy.orm import Session, sessionmaker
 
 from monitoring.logger import setup_logger
 from storage.models import (
-    Base,
-    Token,
-    TokenScore,
-    Signal,
-    CreatorProfile,
     AuditLog,
-    SystemState,
-    SignalHistory,
-    TokenLifecycle,
+    Base,
+    CreatorProfile,
     PerformanceMetrics,
+    Signal,
+    SignalHistory,
+    SystemState,
+    Token,
+    TokenLifecycle,
+    TokenScore,
 )
 from config.settings import Settings
 
@@ -67,6 +67,27 @@ class SQLiteStore:
             logger.warning(f"Could not serialize JSON payload: {e}")
             return None
 
+    def _filter_model_payload(self, model: Type[Base], payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Keep only columns that belong to the SQLAlchemy model."""
+        if not payload:
+            return {}
+        model_fields = set(model.__table__.columns.keys())
+        return {key: value for key, value in payload.items() if key in model_fields}
+
+    def _extract_component_score(
+        self,
+        payload: Dict[str, Any],
+        direct_key: str,
+        component_key: str,
+    ) -> Optional[float]:
+        """Extract component score either from flat payload or nested component_results."""
+        if payload.get(direct_key) is not None:
+            return payload.get(direct_key)
+
+        component_results = payload.get("component_results", {}) or {}
+        component_data = component_results.get(component_key, {}) or {}
+        return component_data.get("score")
+
     # -------------------------------------------------------------------------
     # TOKEN OPERATIONS
     # -------------------------------------------------------------------------
@@ -74,7 +95,8 @@ class SQLiteStore:
         """Create token record."""
         session = self._get_session()
         try:
-            token = Token(**token_data)
+            payload = self._filter_model_payload(Token, token_data)
+            token = Token(**payload)
             session.add(token)
             session.commit()
             session.refresh(token)
@@ -116,18 +138,15 @@ class SQLiteStore:
             if not token:
                 return None
 
-            ignored_fields: List[str] = []
-
-            for key, value in updates.items():
-                if hasattr(token, key):
-                    setattr(token, key, value)
-                else:
-                    ignored_fields.append(key)
-
+            payload = self._filter_model_payload(Token, updates)
+            ignored_fields = sorted(set(updates.keys()) - set(payload.keys()))
             if ignored_fields:
                 logger.warning(
-                    f"Ignored unknown Token fields for {mint[:8]}...: {', '.join(sorted(ignored_fields))}"
+                    f"Ignored unknown Token fields for {mint[:8]}...: {', '.join(ignored_fields)}"
                 )
+
+            for key, value in payload.items():
+                setattr(token, key, value)
 
             token.updated_at = datetime.utcnow()
             session.commit()
@@ -142,7 +161,7 @@ class SQLiteStore:
 
     def upsert_token_base(self, token_data: Dict[str, Any]) -> Token:
         """
-        Create token if missing, otherwise update only base identity fields.
+        Create token if missing, otherwise update the discovery/base identity fields.
         """
         mint = token_data["mint"]
         session = self._get_session()
@@ -150,13 +169,33 @@ class SQLiteStore:
         try:
             token = session.query(Token).filter(Token.mint == mint).first()
 
+            payload = self._filter_model_payload(
+                Token,
+                {
+                    "mint": mint,
+                    "name": token_data.get("name"),
+                    "symbol": token_data.get("symbol"),
+                    "creator": token_data.get("creator"),
+                    "uri": token_data.get("uri"),
+                    "tx_signature": token_data.get("tx_signature") or token_data.get("signature"),
+                    "initial_sol": token_data.get("initial_sol"),
+                    "initial_buy": token_data.get("initial_buy"),
+                    "bonding_curve": token_data.get("bonding_curve"),
+                    "v_tokens_in_bonding_curve": token_data.get("v_tokens_in_bonding_curve"),
+                    "v_sol_in_bonding_curve": token_data.get("v_sol_in_bonding_curve"),
+                    "market_cap_sol": token_data.get("market_cap_sol"),
+                },
+            )
+
             if not token:
-                token = Token(**token_data)
+                token = Token(**payload)
                 session.add(token)
             else:
-                for key in ("name", "symbol", "creator", "uri", "tx_signature"):
-                    if key in token_data and hasattr(token, key):
-                        setattr(token, key, token_data[key])
+                for key, value in payload.items():
+                    if key == "mint":
+                        continue
+                    if value is not None:
+                        setattr(token, key, value)
                 token.updated_at = datetime.utcnow()
 
             session.commit()
@@ -179,6 +218,12 @@ class SQLiteStore:
             "symbol": enriched_data.get("symbol"),
             "creator": enriched_data.get("creator"),
             "uri": enriched_data.get("uri"),
+            "tx_signature": enriched_data.get("tx_signature") or enriched_data.get("signature"),
+            "initial_sol": enriched_data.get("initial_sol"),
+            "initial_buy": enriched_data.get("initial_buy"),
+            "bonding_curve": enriched_data.get("bonding_curve"),
+            "v_tokens_in_bonding_curve": enriched_data.get("v_tokens_in_bonding_curve"),
+            "v_sol_in_bonding_curve": enriched_data.get("v_sol_in_bonding_curve"),
             "mint_authority": enriched_data.get("mint_authority"),
             "freeze_authority": enriched_data.get("freeze_authority"),
             "owner": enriched_data.get("owner"),
@@ -200,11 +245,38 @@ class SQLiteStore:
         """
         Persist filter-stage summary on Token.
         """
+        passed_filters = filter_data.get("passed_filters")
+        if passed_filters is None:
+            passed_filters = True
+
+        authority_risk = self._extract_component_score(
+            filter_data,
+            direct_key="authority_risk",
+            component_key="authority_risk",
+        )
+        creator_risk = self._extract_component_score(
+            filter_data,
+            direct_key="creator_risk",
+            component_key="creator_risk",
+        )
+        concentration_risk = self._extract_component_score(
+            filter_data,
+            direct_key="concentration_risk",
+            component_key="concentration_risk",
+        )
+
         updates = {
-            "passed_filters": filter_data.get("passed_filters", True),
+            "passed_filters": bool(passed_filters),
             "risk_level": filter_data.get("aggregate_risk_level") or filter_data.get("risk_level"),
             "risk_score": filter_data.get("aggregate_risk_score") or filter_data.get("risk_score"),
-            "rejection_reason": filter_data.get("rejection_reason") or filter_data.get("reason"),
+            "rejection_reason": (
+                filter_data.get("rejection_reason")
+                or filter_data.get("reason")
+                or ""
+            ) if not passed_filters else "",
+            "authority_risk": authority_risk,
+            "creator_risk": creator_risk,
+            "concentration_risk": concentration_risk,
         }
         updates = {k: v for k, v in updates.items() if v is not None}
         return self.update_token(mint, updates)
@@ -218,11 +290,13 @@ class SQLiteStore:
         updates = {
             "final_score": score_data.get("final_score"),
             "confidence": score_data.get("confidence"),
+            "risk_score": score_data.get("aggregate_risk_score"),
             "risk_level": score_data.get("aggregate_risk_level") or score_data.get("risk_level"),
             "authority_risk": breakdown.get("authority_risk"),
             "creator_risk": breakdown.get("creator_risk"),
             "concentration_risk": breakdown.get("concentration_risk"),
             "flow_score": breakdown.get("flow_score"),
+            "market_cap_sol": breakdown.get("market_cap_sol"),
         }
         updates = {k: v for k, v in updates.items() if v is not None}
         return self.update_token(mint, updates)
@@ -232,6 +306,9 @@ class SQLiteStore:
         Persist Raydium/market confirmation fields on Token.
         """
         pool = raydium_data.get("pool", {}) or {}
+        pool_validation = raydium_data.get("pool_validation", {}) or {}
+        checks = raydium_data.get("checks", {}) or pool_validation.get("checks", {}) or {}
+        pool_age_info = checks.get("pool_age", {}) or {}
 
         liquidity_sol = (
             raydium_data.get("liquidity_sol")
@@ -240,6 +317,21 @@ class SQLiteStore:
         )
         if liquidity_sol is None:
             liquidity_sol = raydium_data.get("raydium_liquidity_sol")
+        if liquidity_sol is None:
+            liquidity_sol = pool_validation.get("liquidity_sol")
+
+        pool_age_minutes = pool_age_info.get("pool_age_minutes")
+        if pool_age_minutes is None and raydium_data.get("elapsed_seconds") is not None:
+            try:
+                pool_age_minutes = round(float(raydium_data["elapsed_seconds"]) / 60.0, 4)
+            except (TypeError, ValueError):
+                pool_age_minutes = None
+
+        validation_score = (
+            raydium_data.get("validation_score")
+            if raydium_data.get("validation_score") is not None
+            else pool_validation.get("validation_score")
+        )
 
         updates = {
             "raydium_pool_found": bool(
@@ -247,11 +339,20 @@ class SQLiteStore:
                 or pool.get("id")
                 or raydium_data.get("pool_id")
                 or raydium_data.get("raydium_pool_id")
+                or pool_validation.get("pool_id")
             ),
-            "raydium_pool_id": pool.get("pool_id") or pool.get("id") or raydium_data.get("pool_id"),
+            "raydium_pool_id": (
+                pool.get("pool_id")
+                or pool.get("id")
+                or raydium_data.get("pool_id")
+                or pool_validation.get("pool_id")
+            ),
             "raydium_liquidity_sol": liquidity_sol,
-            "validation_score": raydium_data.get("validation_score"),
+            "raydium_pool_age_minutes": pool_age_minutes,
+            "validation_score": validation_score,
             "market_cap_sol": raydium_data.get("market_cap_sol"),
+            "confidence": raydium_data.get("new_confidence") or raydium_data.get("confidence"),
+            "final_score": raydium_data.get("score") or raydium_data.get("final_score"),
         }
         updates = {k: v for k, v in updates.items() if v is not None}
         return self.update_token(mint, updates)
@@ -263,7 +364,8 @@ class SQLiteStore:
         """Create score record."""
         session = self._get_session()
         try:
-            score = TokenScore(**score_data)
+            payload = self._filter_model_payload(TokenScore, score_data)
+            score = TokenScore(**payload)
             session.add(score)
             session.commit()
             session.refresh(score)
@@ -326,7 +428,8 @@ class SQLiteStore:
         """Create signal record."""
         session = self._get_session()
         try:
-            signal = Signal(**signal_data)
+            payload = self._filter_model_payload(Signal, signal_data)
+            signal = Signal(**payload)
             session.add(signal)
             session.commit()
             session.refresh(signal)
@@ -345,10 +448,11 @@ class SQLiteStore:
             signal = session.query(Signal).filter(Signal.signal_id == signal_id).first()
             if not signal:
                 return None
-            for key, value in updates.items():
-                if hasattr(signal, key):
-                    setattr(signal, key, value)
-            signal.updated_at = datetime.utcnow()
+
+            payload = self._filter_model_payload(Signal, updates)
+            for key, value in payload.items():
+                setattr(signal, key, value)
+
             session.commit()
             session.refresh(signal)
             return signal
@@ -411,7 +515,8 @@ class SQLiteStore:
         """Create creator profile."""
         session = self._get_session()
         try:
-            profile = CreatorProfile(**creator_data)
+            payload = self._filter_model_payload(CreatorProfile, creator_data)
+            profile = CreatorProfile(**payload)
             session.add(profile)
             session.commit()
             session.refresh(profile)
@@ -440,7 +545,6 @@ class SQLiteStore:
 
     def update_creator_profile(self, creator: str, updates: Dict[str, Any]) -> CreatorProfile:
         """Update creator profile, creating it if it does not exist (upsert)."""
-        # Alias: callers may send total_tokens_created instead of total_tokens
         if "total_tokens_created" in updates and "total_tokens" not in updates:
             updates = updates.copy()
             updates["total_tokens"] = updates.pop("total_tokens_created")
@@ -452,14 +556,13 @@ class SQLiteStore:
                 .filter(CreatorProfile.creator == creator)
                 .first()
             )
+            payload = self._filter_model_payload(CreatorProfile, updates)
             if not profile:
-                filtered = {k: v for k, v in updates.items() if hasattr(CreatorProfile, k)}
-                profile = CreatorProfile(creator=creator, **filtered)
+                profile = CreatorProfile(creator=creator, **payload)
                 session.add(profile)
             else:
-                for key, value in updates.items():
-                    if hasattr(profile, key):
-                        setattr(profile, key, value)
+                for key, value in payload.items():
+                    setattr(profile, key, value)
             profile.updated_at = datetime.utcnow()
             session.commit()
             session.refresh(profile)
@@ -473,7 +576,6 @@ class SQLiteStore:
 
     def upsert_creator_profile(self, creator: str, updates: Dict[str, Any]) -> CreatorProfile:
         """Create or update creator profile."""
-        # Alias: callers may send total_tokens_created instead of total_tokens
         if "total_tokens_created" in updates and "total_tokens" not in updates:
             updates = updates.copy()
             updates["total_tokens"] = updates.pop("total_tokens_created")
@@ -485,12 +587,12 @@ class SQLiteStore:
                 .filter(CreatorProfile.creator == creator)
                 .first()
             )
+            payload = self._filter_model_payload(CreatorProfile, updates)
             if not profile:
                 profile = CreatorProfile(creator=creator)
                 session.add(profile)
-            for key, value in updates.items():
-                if hasattr(profile, key):
-                    setattr(profile, key, value)
+            for key, value in payload.items():
+                setattr(profile, key, value)
             profile.updated_at = datetime.utcnow()
             session.commit()
             session.refresh(profile)

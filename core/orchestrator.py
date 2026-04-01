@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 from monitoring.logger import setup_logger
 from config.settings import Settings
@@ -125,6 +125,19 @@ class Orchestrator:
 
         logger.info("Event handlers registered successfully")
 
+    def _safe_store_call(
+        self,
+        description: str,
+        operation: Callable[..., Any],
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        """Execute a synchronous store call without breaking the pipeline."""
+        try:
+            operation(*args, **kwargs)
+        except Exception as e:
+            logger.error(f"Persistence error during {description}: {e}")
+
     async def _handle_token_discovered(self, event: Event) -> None:
         try:
             mint = event.data.get("mint")
@@ -146,6 +159,12 @@ class Orchestrator:
             if not initialized:
                 self.lock_manager.unlock_token(mint)
                 return
+
+            self._safe_store_call(
+                f"base token persistence for {mint[:8]}...",
+                self.store.upsert_token_base,
+                event.data,
+            )
 
             self._merge_token_context(mint, event.data)
             logger.info(f"TokenDiscovered: {symbol} ({mint[:8]}...)")
@@ -186,6 +205,13 @@ class Orchestrator:
                 state="ENRICHED",
                 event="TokenEnriched",
                 details=event.data,
+            )
+
+            self._safe_store_call(
+                f"enrichment persistence for {mint[:8]}...",
+                self.store.update_token_enrichment,
+                mint,
+                event.data,
             )
 
             if self.creator_profiler:
@@ -230,6 +256,13 @@ class Orchestrator:
                 details=event.data,
             )
 
+            self._safe_store_call(
+                f"filter-pass persistence for {mint[:8]}...",
+                self.store.update_token_filter_result,
+                mint,
+                {**event.data, "passed_filters": True},
+            )
+
             if self.score_engine:
                 await self.score_engine.score_and_emit(event)
 
@@ -244,6 +277,13 @@ class Orchestrator:
 
             reason = event.data.get("reason", "Unknown")
             self._merge_token_context(mint, event.data)
+
+            self._safe_store_call(
+                f"filter-reject persistence for {mint[:8]}...",
+                self.store.update_token_filter_result,
+                mint,
+                {**event.data, "passed_filters": False},
+            )
 
             await self.state_manager.mark_abandoned(mint, reason)
             await self._stop_raydium_watch(mint)
@@ -265,6 +305,19 @@ class Orchestrator:
                 state="SCORED",
                 event="ScoreCalculated",
                 details=event.data,
+            )
+
+            self._safe_store_call(
+                f"token scoring summary persistence for {mint[:8]}...",
+                self.store.update_token_scoring,
+                mint,
+                event.data,
+            )
+            self._safe_store_call(
+                f"token score analysis persistence for {mint[:8]}...",
+                self.store.record_score_analysis,
+                mint,
+                event.data,
             )
 
             if self.decision_mapper:
@@ -384,12 +437,31 @@ class Orchestrator:
                 details=event.data,
             )
 
+            self._safe_store_call(
+                f"raydium pool-found persistence for {mint[:8]}...",
+                self.store.update_token_raydium_status,
+                mint,
+                event.data,
+            )
+
             if not self.raydium_pool_validator:
                 logger.warning("RaydiumPoolValidator not initialized")
                 return
 
             validation_result = await self.raydium_pool_validator.validate_pool(pool_data)
             self.pool_validations[mint] = validation_result or {}
+
+            self._safe_store_call(
+                f"raydium validation persistence for {mint[:8]}...",
+                self.store.update_token_raydium_status,
+                mint,
+                {
+                    **event.data,
+                    **(validation_result or {}),
+                    "pool": pool_data,
+                    "pool_validation": validation_result or {},
+                },
+            )
 
             if not validation_result or not validation_result.get("is_valid", False):
                 await self.state_manager.update_token_state(
@@ -462,6 +534,13 @@ class Orchestrator:
                 reason="Raydium pool not found before timeout",
             )
 
+            self._safe_store_call(
+                f"raydium timeout persistence for {mint[:8]}...",
+                self.store.update_token_raydium_status,
+                mint,
+                event.data,
+            )
+
             await self._stop_raydium_watch(mint)
             self.lock_manager.unlock_token(mint)
 
@@ -481,6 +560,13 @@ class Orchestrator:
                 state="MARKET_CONFIRMED",
                 event="MarketConfirmed",
                 details=event.data,
+            )
+
+            self._safe_store_call(
+                f"market confirmation persistence for {mint[:8]}...",
+                self.store.update_token_raydium_status,
+                mint,
+                event.data,
             )
 
             if self.signal_engine:
