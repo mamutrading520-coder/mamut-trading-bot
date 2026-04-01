@@ -5,8 +5,8 @@ from monitoring.logger import setup_logger
 from core.event_bus import Event, get_event_bus
 from storage.sqlite_store import SQLiteStore
 from config.settings import Settings
-from config.thresholds import CREATOR_RISK_PATTERNS
 from utils.time_utils import get_timestamp, days_since
+from filters.creator_risk_checker import CreatorRiskChecker
 
 logger = setup_logger("CreatorProfiler")
 
@@ -17,6 +17,7 @@ class CreatorProfiler:
         self.store = store
         self.settings = settings
         self.event_bus = get_event_bus()
+        self.risk_checker = CreatorRiskChecker()
         self.analyzed_count = 0
         self.failed_count = 0
     
@@ -67,45 +68,16 @@ class CreatorProfiler:
             analysis["failed_tokens"] = profile.failed_tokens or 0
             analysis["successful_tokens"] = profile.successful_tokens or 0
             analysis["average_score"] = profile.average_score or 0.0
-            analysis["wallet_age_days"] = profile.wallet_age_days or 0
+            analysis["wallet_age_days"] = self._calculate_wallet_age_days(profile.first_token_date)
             analysis["is_trusted"] = profile.is_trusted or False
             analysis["is_blacklisted"] = profile.is_blacklisted or False
             
-            risk_score = 0.0
-            
-            # Risk factor: Blacklisted creator
-            if analysis["is_blacklisted"]:
-                risk_score += 100.0
-                analysis["risk_factors"].append("Creator is blacklisted")
-                return risk_score, analysis
-            
-            # Risk factor: High failure rate
             if analysis["total_tokens"] > 0:
-                failure_rate = analysis["failed_tokens"] / analysis["total_tokens"]
-                analysis["failure_rate"] = failure_rate
-                
-                if failure_rate > 0.5:  # More than 50% failures
-                    risk_score += 40.0
-                    analysis["risk_factors"].append(f"High failure rate: {failure_rate:.1%}")
-                elif failure_rate > 0.3:  # More than 30% failures
-                    risk_score += 25.0
-                    analysis["risk_factors"].append(f"Moderate failure rate: {failure_rate:.1%}")
+                analysis["failure_rate"] = analysis["failed_tokens"] / analysis["total_tokens"]
             
-            # Risk factor: Young wallet
-            min_age_days = CREATOR_RISK_PATTERNS.get("wallet_age_min_days", 7)
-            if analysis["wallet_age_days"] < min_age_days:
-                risk_score += 30.0
-                analysis["risk_factors"].append(f"Wallet too young: {analysis['wallet_age_days']} days")
-            
-            # Risk factor: Too many tokens launched
-            if analysis["total_tokens"] > 10:
-                risk_score += 15.0
-                analysis["risk_factors"].append(f"High token count: {analysis['total_tokens']}")
-            
-            # Positive factor: Trusted creator
-            if analysis["is_trusted"]:
-                risk_score = max(0, risk_score - 20.0)
-                analysis["risk_factors"].append("Trusted creator (reputation bonus)")
+            # Delegate to CreatorRiskChecker for consistent scoring
+            risk_score, checker_result = self.risk_checker.check_creator_risk(analysis)
+            analysis["risk_factors"] = checker_result.get("risk_factors", [])
             
             # Clamp score to 0-100
             risk_score = max(0.0, min(100.0, risk_score))
@@ -144,6 +116,9 @@ class CreatorProfiler:
                     "risk_level": self._get_risk_level(risk_score),
                     "last_token_date": datetime.utcnow(),
                 }
+                # Record first_token_date when creating a new profile
+                if analysis["total_tokens"] == 0:
+                    profile_updates["first_token_date"] = datetime.utcnow()
                 self.store.upsert_creator_profile(creator, profile_updates)
             
             self.analyzed_count += 1

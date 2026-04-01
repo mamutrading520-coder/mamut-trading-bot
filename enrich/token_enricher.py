@@ -69,6 +69,14 @@ class EnrichedTokenData:
     holder_count: int = 0
     creator_balance: float = 0.0
 
+    # Holder distribution metrics (from getTokenLargestAccounts)
+    top_holder_percentage: float = 0.0
+    top_5_holders_percentage: float = 0.0
+    top_10_holders_percentage: float = 0.0
+    creator_hold_percentage: float = 0.0
+    fresh_wallet_ratio: float = 0.0
+    sniper_wallets_detected: int = 0
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
         return {
@@ -113,6 +121,12 @@ class EnrichedTokenData:
             "holder_risk_flags": self.holder_risk_flags,
             "holder_count": self.holder_count,
             "creator_balance": self.creator_balance,
+            "top_holder_percentage": self.top_holder_percentage,
+            "top_5_holders_percentage": self.top_5_holders_percentage,
+            "top_10_holders_percentage": self.top_10_holders_percentage,
+            "creator_hold_percentage": self.creator_hold_percentage,
+            "fresh_wallet_ratio": self.fresh_wallet_ratio,
+            "sniper_wallets_detected": self.sniper_wallets_detected,
         }
 
 
@@ -248,6 +262,99 @@ class TokenEnricher:
             logger.debug(f"Error fetching URI metadata from {uri}: {e}")
             return None
 
+    async def _fetch_largest_accounts(self, mint: str) -> Optional[Dict[str, Any]]:
+        """Fetch the largest token accounts from Solana RPC.
+
+        Calls ``getTokenLargestAccounts`` which returns up to 20 accounts sorted
+        by balance descending.  The result is used to compute holder-distribution
+        metrics (top-1/5/10 holder percentages) that are later passed to
+        ``HolderAnalyzer``.
+        """
+        try:
+            client = await self._get_http_client()
+
+            payload = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "getTokenLargestAccounts",
+                "params": [mint],
+            }
+
+            response = await client.post(self.rpc_url, json=payload)
+            response.raise_for_status()
+            result = response.json()
+
+            if "result" in result and "value" in result["result"]:
+                accounts = result["result"]["value"]
+                return {"accounts": accounts}
+
+            logger.debug(f"No largest-accounts data for {mint}")
+            return None
+
+        except asyncio.TimeoutError:
+            logger.warning(f"Timeout fetching largest accounts for {mint}")
+            return None
+        except Exception as e:
+            logger.debug(f"Error fetching largest accounts for {mint}: {e}")
+            return None
+
+    def _compute_holder_metrics(
+        self,
+        accounts: list,
+        total_supply_raw: int,
+        decimals: int,
+        creator: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Derive holder-distribution metrics from ``getTokenLargestAccounts`` data.
+
+        Args:
+            accounts: List of account dicts returned by the RPC call.
+            total_supply_raw: Raw token supply (as returned by ``getTokenSupply``).
+            decimals: Token decimals.
+            creator: Creator wallet address (unused for now, reserved for future
+                     on-chain owner resolution).
+
+        Returns:
+            Dict with ``top_holder_percentage``, ``top_5_holders_percentage``,
+            ``top_10_holders_percentage``, and ``holder_count``.
+        """
+        if not accounts or total_supply_raw <= 0 or decimals < 0 or decimals > 255:
+            return {
+                "top_holder_percentage": 0.0,
+                "top_5_holders_percentage": 0.0,
+                "top_10_holders_percentage": 0.0,
+                "holder_count": 0,
+            }
+
+        scale = 10 ** decimals
+        total_supply_ui = total_supply_raw / scale
+
+        def _ui_amount(account: Dict[str, Any]) -> float:
+            ui = account.get("uiAmount")
+            if ui is not None:
+                return float(ui)
+            raw = account.get("amount")
+            if raw is not None:
+                try:
+                    return int(raw) / scale
+                except (TypeError, ValueError):
+                    pass
+            return 0.0
+
+        amounts = [_ui_amount(a) for a in accounts]
+
+        def _pct(top_n: int) -> float:
+            if total_supply_ui <= 0:
+                return 0.0
+            return round(sum(amounts[:top_n]) / total_supply_ui * 100, 4)
+
+        return {
+            "top_holder_percentage": _pct(1),
+            "top_5_holders_percentage": _pct(5),
+            "top_10_holders_percentage": _pct(10),
+            "holder_count": len(accounts),
+        }
+
     def _build_metadata_input(
         self,
         token_data: Dict[str, Any],
@@ -290,10 +397,11 @@ class TokenEnricher:
                 tx_signature=token_data.get("tx_signature"),
             )
 
-            token_metadata, account_info, uri_metadata = await asyncio.gather(
+            token_metadata, account_info, uri_metadata, largest_accounts = await asyncio.gather(
                 self._fetch_token_metadata(mint),
                 self._fetch_token_account(mint),
                 self._fetch_uri_metadata(enriched.uri),
+                self._fetch_largest_accounts(mint),
                 return_exceptions=False,
             )
 
@@ -312,6 +420,23 @@ class TokenEnricher:
             if uri_metadata:
                 enriched.uri_metadata = uri_metadata
                 enriched.metadata_retrieved = True
+
+            # Compute holder-distribution metrics from the largest-accounts data
+            # and populate the enriched object so that HolderAnalyzer receives
+            # meaningful input rather than all-zero defaults.
+            if largest_accounts:
+                holder_metrics = self._compute_holder_metrics(
+                    accounts=largest_accounts.get("accounts", []),
+                    total_supply_raw=enriched.total_supply,
+                    decimals=enriched.decimals,
+                    creator=enriched.creator,
+                )
+                enriched.top_holder_percentage = holder_metrics["top_holder_percentage"]
+                enriched.top_5_holders_percentage = holder_metrics["top_5_holders_percentage"]
+                enriched.top_10_holders_percentage = holder_metrics["top_10_holders_percentage"]
+                # Use the API holder count only when it improves on the default.
+                if holder_metrics["holder_count"] > enriched.holder_count:
+                    enriched.holder_count = holder_metrics["holder_count"]
 
             metadata_input = self._build_metadata_input(token_data, uri_metadata)
             metadata_analysis = await self.metadata_analyzer.analyze(metadata_input)
@@ -336,6 +461,7 @@ class TokenEnricher:
             enriched.holder_risk_flags = list(holder_analysis.get("holder_risk_flags", []) or [])
             enriched.holder_count = int(holder_analysis.get("holder_count", 0) or 0)
             creator_hold_pct = float(holder_analysis.get("creator_hold_percentage", 0.0) or 0.0)
+            enriched.creator_hold_percentage = creator_hold_pct
             enriched.creator_balance = (creator_hold_pct / 100.0) * enriched.total_supply
 
             self.enriched_count += 1
