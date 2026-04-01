@@ -1,9 +1,26 @@
 """Configuration settings for Mamut engine - loads from .env"""
-from pydantic_settings import BaseSettings
+from __future__ import annotations
+
 from typing import Optional
 
+from pydantic_settings import BaseSettings
+
+from config.thresholds import (
+    AUTHORITY_RISK_MAX,
+    CONCENTRATION_RISK_MAX,
+    CREATOR_RISK_MAX,
+    HIGH_POTENTIAL_SCORE,
+    MEDIUM_POTENTIAL_SCORE,
+    LOW_POTENTIAL_SCORE,
+    RAYDIUM_MIN_LIQUIDITY_SOL,
+    RAYDIUM_POOL_TIMEOUT_SECONDS,
+    SIGNAL_DEDUP_WINDOW_SECONDS,
+    TOKEN_LOCK_TIMEOUT_SECONDS,
+)
+
+
 class Settings(BaseSettings):
-    """Application settings with environment variable support"""
+    """Application settings with environment variable support."""
 
     # Pump.fun Configuration
     pump_ws_url: str = "wss://pumpportal.fun/api/data"
@@ -13,8 +30,8 @@ class Settings(BaseSettings):
     # Raydium Configuration
     raydium_ws_url: str = "wss://api.raydium.io/ws"
     raydium_api_url: str = "https://api.raydium.io/v2/sdk/liquidity/mainnet.json"
-    raydium_pool_timeout: int = 30
-    raydium_pool_min_liquidity: float = 10.0
+    raydium_pool_timeout: int = RAYDIUM_POOL_TIMEOUT_SECONDS
+    raydium_pool_min_liquidity: float = RAYDIUM_MIN_LIQUIDITY_SOL
 
     # Solana RPC Configuration
     solana_rpc_url: str = "https://api.mainnet-beta.solana.com"
@@ -25,15 +42,15 @@ class Settings(BaseSettings):
     database_pool_size: int = 10
     database_echo: bool = False
 
-    # Scoring Thresholds 
-    score_threshold_high_potential: float = 70.0
-    score_threshold_medium_potential: float = 50.0
-    score_threshold_low_potential: float = 30.0
+    # Scoring Thresholds
+    score_threshold_high_potential: float = HIGH_POTENTIAL_SCORE
+    score_threshold_medium_potential: float = MEDIUM_POTENTIAL_SCORE
+    score_threshold_low_potential: float = LOW_POTENTIAL_SCORE
 
     # Risk Thresholds
-    authority_risk_max: float = 80.0
-    creator_risk_max: float = 80.0
-    concentration_max: float = 80.0
+    authority_risk_max: float = AUTHORITY_RISK_MAX
+    creator_risk_max: float = CREATOR_RISK_MAX
+    concentration_max: float = CONCENTRATION_RISK_MAX
 
     # Logging Configuration
     log_level: str = "INFO"
@@ -48,8 +65,8 @@ class Settings(BaseSettings):
 
     # System Configuration
     max_concurrent_tokens: int = 1000
-    token_lock_timeout: int = 3600
-    signal_dedup_window: int = 60
+    token_lock_timeout: int = TOKEN_LOCK_TIMEOUT_SECONDS
+    signal_dedup_window: int = SIGNAL_DEDUP_WINDOW_SECONDS
 
     class Config:
         env_file = ".env"
