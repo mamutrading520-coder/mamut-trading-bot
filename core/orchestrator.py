@@ -281,7 +281,10 @@ class Orchestrator:
 
             if decision == "SIGNAL_EARLY":
                 if self.signal_engine:
-                    await self.signal_engine.generate_early_and_emit(event)
+                    await self.signal_engine.generate_early_and_emit(
+                        event=event,
+                        token_context=self.token_context.get(mint, {}),
+                    )
                 await self._start_raydium_watch(mint)
 
             elif decision == "MONITOR":
@@ -336,7 +339,14 @@ class Orchestrator:
                 return
 
             signal_type = event.data.get("signal_type", "UNKNOWN")
+            dispatch_success = bool(event.data.get("success", False))
             self._merge_token_context(mint, event.data)
+
+            if not dispatch_success:
+                logger.warning(
+                    f"Alert dispatch failed for {mint[:8]}... ({signal_type})"
+                )
+                return
 
             await self.state_manager.update_token_state(
                 mint=mint,

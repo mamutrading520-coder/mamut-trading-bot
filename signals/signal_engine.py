@@ -57,25 +57,51 @@ class SignalEngine:
         self.confirmation_signals = 0
         self.abandon_signals = 0
 
-    async def generate_early_and_emit(self, event: Event) -> bool:
+    async def generate_early_and_emit(
+        self,
+        event: Event,
+        token_context: Optional[Dict[str, Any]] = None,
+    ) -> bool:
         start_time = time.time()
         try:
             decision_data = event.data or {}
-            decision_str = decision_data.get("decision", "UNKNOWN")
+            token_context = token_context or {}
+            merged_context = {**token_context, **decision_data}
+
+            mint = merged_context.get("mint")
+            if not mint:
+                logger.error("generate_early_and_emit called without mint")
+                return False
+
+            decision_str = merged_context.get("decision", "UNKNOWN")
+            classification = merged_context.get("classification", decision_str)
+
+            metadata = self._build_common_metadata(
+                source_data=merged_context,
+                token_context=token_context,
+            )
+            metadata.update(
+                {
+                    "source_event": event.event_type,
+                    "signal_stage": "EARLY",
+                    "decision": decision_str,
+                    "classification": classification,
+                }
+            )
 
             signal = SignalData(
                 signal_id=f"SIGNAL-{uuid.uuid4().hex[:12]}",
                 signal_type="EARLY",
-                mint=decision_data.get("mint"),
-                symbol=decision_data.get("symbol", "UNKNOWN"),
-                score=float(decision_data.get("final_score", 0) or 0),
-                confidence=float(decision_data.get("confidence", 0.5) or 0.5),
-                risk_level=decision_str,
-                reason=f"Decision: {decision_str}",
-                metadata={
-                    "decision": decision_str,
-                    "source_event": event.event_type,
-                },
+                mint=mint,
+                symbol=merged_context.get("symbol", "UNKNOWN"),
+                score=self._safe_float(
+                    merged_context.get("final_score", merged_context.get("score", 0))
+                ),
+                confidence=self._safe_float(merged_context.get("confidence", 0.5), 0.5),
+                risk_level=merged_context.get("aggregate_risk_level", "UNKNOWN"),
+                reason=merged_context.get("reasoning")
+                or f"Early signal classified as {classification}",
+                metadata=metadata,
                 timestamp=datetime.utcnow(),
             )
 
@@ -115,64 +141,54 @@ class SignalEngine:
         try:
             confirmation_data = event.data or {}
             token_context = token_context or {}
+            merged_context = {**token_context, **confirmation_data}
 
-            mint = confirmation_data.get("mint") or token_context.get("mint")
-            symbol = (
-                confirmation_data.get("symbol")
-                or token_context.get("symbol")
-                or "UNKNOWN"
-            )
+            mint = merged_context.get("mint")
+            symbol = merged_context.get("symbol", "UNKNOWN")
 
             if not mint:
                 logger.error("generate_confirmed_and_emit called without mint")
                 return False
 
             base_score = self._safe_float(
-                confirmation_data.get("score", token_context.get("final_score", 0))
+                merged_context.get("score", merged_context.get("final_score", 0))
             )
             confidence = self._safe_float(
-                confirmation_data.get(
-                    "new_confidence",
-                    confirmation_data.get(
-                        "confidence",
-                        token_context.get("confidence", 0.5),
-                    ),
-                )
+                merged_context.get("new_confidence", merged_context.get("confidence", 0.5)),
+                0.5,
             )
 
             pool_validation = confirmation_data.get("pool_validation", {}) or {}
             pool_info = confirmation_data.get("pool", {}) or {}
 
-            validation_score = self._safe_float(
-                pool_validation.get("validation_score", 0)
-            )
+            validation_score = self._safe_float(pool_validation.get("validation_score", 0))
             liquidity_sol = self._safe_float(
                 pool_validation.get("liquidity_sol", pool_info.get("liquidity_sol", 0))
             )
 
-            risk_level = confirmation_data.get(
-                "risk_level",
-                token_context.get("decision", "CONFIRMED"),
+            metadata = self._build_common_metadata(
+                source_data=merged_context,
+                token_context=token_context,
             )
-            confirmation_reason = confirmation_data.get(
-                "reason",
-                "Market confirmed after Raydium pool validation",
+            metadata.update(
+                {
+                    "source_event": event.event_type,
+                    "signal_stage": "CONFIRMED",
+                    "pool_id": pool_info.get("id") or pool_info.get("pool_id"),
+                    "pool_address": pool_info.get("address")
+                    or pool_info.get("pool_address")
+                    or pool_validation.get("pool_address"),
+                    "liquidity_sol": liquidity_sol,
+                    "validation_score": validation_score,
+                    "pool_validation": pool_validation,
+                    "confidence_boost": self._safe_float(
+                        confirmation_data.get("confidence_boost", 0)
+                    ),
+                    "market_stage": confirmation_data.get("market_stage"),
+                    "confirmation_checks": confirmation_data.get("checks", {}),
+                    "confirmation_reasons": list(confirmation_data.get("reasons", []) or []),
+                }
             )
-
-            metadata = {
-                "source_event": event.event_type,
-                "decision": token_context.get("decision"),
-                "pool_id": pool_info.get("id") or pool_info.get("pool_id"),
-                "pool_address": pool_info.get("address") or pool_info.get("pool_address"),
-                "liquidity_sol": liquidity_sol,
-                "validation_score": validation_score,
-                "pool_validation": pool_validation,
-                "confidence_boost": self._safe_float(
-                    confirmation_data.get("confidence_boost", 0)
-                ),
-                "market_stage": confirmation_data.get("market_stage"),
-                "confirmation_checks": confirmation_data.get("checks", {}),
-            }
 
             signal = SignalData(
                 signal_id=f"SIGNAL-{uuid.uuid4().hex[:12]}",
@@ -181,8 +197,11 @@ class SignalEngine:
                 symbol=symbol,
                 score=base_score,
                 confidence=confidence,
-                risk_level=risk_level,
-                reason=confirmation_reason,
+                risk_level=merged_context.get("aggregate_risk_level", "UNKNOWN"),
+                reason=confirmation_data.get(
+                    "reason",
+                    "Market confirmed after Raydium pool validation",
+                ),
                 metadata=metadata,
                 timestamp=datetime.utcnow(),
             )
@@ -213,6 +232,65 @@ class SignalEngine:
         except Exception as e:
             logger.error(f"Error in generate_confirmed_and_emit: {e}")
             return False
+
+    def _build_common_metadata(
+        self,
+        source_data: Dict[str, Any],
+        token_context: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Build a rich signal payload usable for console output and manual follow-up."""
+        token_context = token_context or {}
+        merged = {**token_context, **source_data}
+        score_breakdown = merged.get("score_breakdown", {}) or {}
+
+        component_scores = {
+            "aggregate_risk": self._safe_float(merged.get("aggregate_risk_score", 0)),
+            "authority_risk": self._safe_float(merged.get("authority_risk", 0)),
+            "creator_risk": self._safe_float(merged.get("creator_risk", 0)),
+            "concentration_risk": self._safe_float(merged.get("concentration_risk", 0)),
+            "metadata_risk": self._safe_float(merged.get("metadata_risk", 0)),
+            "honeypot_risk": self._safe_float(merged.get("honeypot_risk", 0)),
+            "wallet_cluster_risk": self._safe_float(merged.get("wallet_cluster_risk", 0)),
+            "metadata_score": self._safe_float(
+                merged.get("metadata_score", score_breakdown.get("metadata_score", 0))
+            ),
+        }
+
+        return {
+            "contract_address": merged.get("mint"),
+            "token_name": merged.get("name") or merged.get("symbol") or "UNKNOWN",
+            "creator": merged.get("creator") or "",
+            "creator_resolved": bool(merged.get("creator_resolved", False)),
+            "initial_sol": self._safe_float(merged.get("initial_sol", 0)),
+            "initial_buy": int(merged.get("initial_buy", 0) or 0),
+            "market_cap_sol": self._safe_float(merged.get("market_cap_sol", 0)),
+            "aggregate_risk_score": self._safe_float(merged.get("aggregate_risk_score", 0)),
+            "aggregate_risk_level": merged.get("aggregate_risk_level"),
+            "metadata_score": component_scores["metadata_score"],
+            "social_count": int(merged.get("social_count", 0) or 0),
+            "holder_count": int(merged.get("holder_count", 0) or 0),
+            "creator_hold_percentage": self._safe_float(
+                merged.get("creator_hold_percentage", 0)
+            ),
+            "top_holder_percentage": self._safe_float(
+                merged.get("top_holder_percentage", 0)
+            ),
+            "top_5_holders_percentage": self._safe_float(
+                merged.get("top_5_holders_percentage", 0)
+            ),
+            "top_10_holders_percentage": self._safe_float(
+                merged.get("top_10_holders_percentage", 0)
+            ),
+            "mint_authority": merged.get("mint_authority"),
+            "freeze_authority": merged.get("freeze_authority"),
+            "owner_renounced": bool(merged.get("owner_renounced", False)),
+            "uri": merged.get("uri"),
+            "description": merged.get("description"),
+            "reasoning": merged.get("reasoning"),
+            "warnings": list(merged.get("warnings", []) or []),
+            "score_notes": list(score_breakdown.get("notes", []) or []),
+            "component_scores": component_scores,
+        }
 
     def _persist_signal(
         self,
