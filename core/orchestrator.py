@@ -45,6 +45,7 @@ class Orchestrator:
         self.alert_dispatcher = None
 
         self.running = False
+        self.initialized = False
         self.start_time: Optional[datetime] = None
         self.tokens_processed = 0
 
@@ -53,8 +54,16 @@ class Orchestrator:
         self.pool_validations: Dict[str, Dict[str, Any]] = {}
         self.market_confirmations: Dict[str, Dict[str, Any]] = {}
 
+        self._background_tasks: Dict[str, asyncio.Task] = {}
+        self._cleanup_lock = asyncio.Lock()
+        self._cleanup_done = False
+
     async def initialize(self) -> bool:
         """Initialize all components and register event handlers."""
+        if self.initialized:
+            logger.info("Orchestrator already initialized")
+            return True
+
         try:
             logger.info("Initializing Mamut orchestrator...")
 
@@ -91,6 +100,7 @@ class Orchestrator:
 
             await self._register_handlers()
 
+            self.initialized = True
             logger.info("All components initialized successfully")
             return True
 
@@ -303,7 +313,6 @@ class Orchestrator:
                 return
 
             signal_type = event.data.get("signal_type", "UNKNOWN")
-
             score = float(event.data.get("score", event.data.get("final_score", 0)) or 0)
 
             if self.signal_deduper.is_duplicate(
@@ -343,9 +352,7 @@ class Orchestrator:
             self._merge_token_context(mint, event.data)
 
             if not dispatch_success:
-                logger.warning(
-                    f"Alert dispatch failed for {mint[:8]}... ({signal_type})"
-                )
+                logger.warning(f"Alert dispatch failed for {mint[:8]}... ({signal_type})")
                 return
 
             await self.state_manager.update_token_state(
@@ -527,24 +534,88 @@ class Orchestrator:
         return self.token_context.get(mint, {}).get("symbol", "UNKNOWN")
 
     async def run(self) -> None:
+        if not self.initialized:
+            raise RuntimeError("Orchestrator must be initialized before run()")
+
+        if self.running:
+            logger.warning("Orchestrator already running")
+            return
+
         try:
             self.running = True
             self.start_time = datetime.utcnow()
+            self._cleanup_done = False
 
-            tasks = [
-                asyncio.create_task(self.pump_listener.start()),
-                asyncio.create_task(self.raydium_listener.monitor_pools()),
-                asyncio.create_task(self._process_tokens()),
-            ]
+            self._start_background_tasks()
+            task_items = list(self._background_tasks.items())
+            results = await asyncio.gather(
+                *(task for _, task in task_items),
+                return_exceptions=True,
+            )
 
-            await asyncio.gather(*tasks)
+            for (task_name, _), result in zip(task_items, results):
+                if isinstance(result, asyncio.CancelledError):
+                    logger.debug(f"Background task cancelled: {task_name}")
+                elif isinstance(result, Exception):
+                    logger.error(f"Background task failed ({task_name}): {result}")
 
         except asyncio.CancelledError:
             logger.info("Orchestrator cancelled")
         except Exception as e:
             logger.error(f"Error in orchestrator run: {e}")
         finally:
+            self.running = False
             await self.cleanup()
+
+    def _start_background_tasks(self) -> None:
+        if not self.pump_listener or not self.raydium_listener:
+            raise RuntimeError("Listeners not initialized")
+
+        if self._background_tasks:
+            return
+
+        self._background_tasks = {
+            "pump_listener": asyncio.create_task(self.pump_listener.start()),
+            "raydium_listener": asyncio.create_task(self.raydium_listener.monitor_pools()),
+            "token_processor": asyncio.create_task(self._process_tokens()),
+        }
+
+    async def _cancel_background_tasks(self) -> None:
+        task_items = list(self._background_tasks.items())
+        self._background_tasks = {}
+
+        if not task_items:
+            return
+
+        for _, task in task_items:
+            if not task.done():
+                task.cancel()
+
+        results = await asyncio.gather(
+            *(task for _, task in task_items),
+            return_exceptions=True,
+        )
+
+        for (task_name, _), result in zip(task_items, results):
+            if isinstance(result, asyncio.CancelledError):
+                logger.debug(f"Background task cancelled during cleanup: {task_name}")
+            elif isinstance(result, Exception):
+                logger.error(
+                    f"Background task errored during cleanup ({task_name}): {result}"
+                )
+
+    async def _stop_runtime_components(self) -> None:
+        if self.pump_listener:
+            try:
+                await self.pump_listener.stop()
+            except Exception as e:
+                logger.error(f"Error stopping PumpListener: {e}")
+
+        if self.raydium_listener:
+            try:
+                await self.raydium_listener.stop()
+            except Exception as e:
+                logger.error(f"Error stopping RaydiumListener: {e}")
 
     async def _process_tokens(self) -> None:
         while self.running:
@@ -552,6 +623,9 @@ class Orchestrator:
                 self.lock_manager.cleanup_expired_locks()
                 self.signal_deduper.cleanup_old_signals()
                 await asyncio.sleep(5)
+            except asyncio.CancelledError:
+                logger.info("Token processor cancelled")
+                break
             except Exception as e:
                 logger.error(f"Error in token processor: {e}")
 
@@ -575,23 +649,36 @@ class Orchestrator:
         }
 
     async def cleanup(self) -> None:
-        try:
-            logger.info("Cleaning up resources...")
+        async with self._cleanup_lock:
+            if self._cleanup_done:
+                return
 
-            if self.token_enricher:
-                await self.token_enricher.close()
+            try:
+                logger.info("Cleaning up resources...")
+                self.running = False
 
-            if self.raydium_listener:
-                await self.raydium_listener.close()
+                await self._stop_runtime_components()
+                await self._cancel_background_tasks()
 
-            if self.alert_dispatcher:
-                await self.alert_dispatcher.close()
+                if self.token_enricher:
+                    await self.token_enricher.close()
 
-            await self.event_bus.stop()
-            logger.info("Cleanup completed")
+                if self.raydium_listener:
+                    await self.raydium_listener.close()
 
-        except Exception as e:
-            logger.error(f"Error during cleanup: {e}")
+                if self.raydium_pool_validator:
+                    await self.raydium_pool_validator.close()
+
+                if self.alert_dispatcher:
+                    await self.alert_dispatcher.close()
+
+                await self.event_bus.stop()
+                logger.info("Cleanup completed")
+
+            except Exception as e:
+                logger.error(f"Error during cleanup: {e}")
+            finally:
+                self._cleanup_done = True
 
     async def shutdown(self) -> None:
         logger.info("Shutdown requested")

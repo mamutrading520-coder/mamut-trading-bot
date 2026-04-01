@@ -26,6 +26,7 @@ class RaydiumListener:
 
         self.pools_found = 0
         self.pools_missed = 0
+        self.running = False
 
         self.http_client: Optional[httpx.AsyncClient] = None
 
@@ -183,6 +184,11 @@ class RaydiumListener:
             del self.monitored_tokens[mint]
             logger.debug(f"Stopped monitoring {mint[:8]}...")
 
+    async def stop(self) -> None:
+        """Stop the pool monitoring loop."""
+        self.running = False
+        logger.info("Stopping Raydium pool monitor")
+
     async def _handle_pool_found(self, mint: str, pool_data: Dict[str, Any]) -> None:
         """Update shared state when a Raydium pool is found for a monitored token."""
         self.pools_found += 1
@@ -218,88 +224,97 @@ class RaydiumListener:
         all monitored tokens can be checked with O(1) lookups instead of an
         O(N) linear scan per token.
         """
+        if self.running:
+            logger.warning("Raydium pool monitor already running")
+            return
+
         logger.info("Starting Raydium pool monitor")
+        self.running = True
 
-        while True:
-            try:
-                mints_to_check = list(self.monitored_tokens.keys())
-                if not mints_to_check:
-                    await asyncio.sleep(5)
-                    continue
-
-                # Fetch pools once per cycle, then build an O(1) lookup index.
-                pools = await self._fetch_raydium_pools()
-                pool_index: Dict[str, Dict[str, Any]] = (
-                    self._build_pool_index(pools) if pools else {}
-                )
-
-                for mint in mints_to_check:
-                    watch_context = self.monitored_tokens.get(mint, {})
-                    start_time = watch_context.get(
-                        "watch_started_at",
-                        datetime.utcnow().timestamp(),
-                    )
-                    elapsed = datetime.utcnow().timestamp() - start_time
-
-                    if elapsed > self.pool_timeout:
-                        self.pools_missed += 1
-                        logger.warning(
-                            f"Pool search timeout for {mint[:8]}... (elapsed: {elapsed:.0f}s)"
-                        )
-
-                        timeout_event = Event(
-                            event_type="PoolSearchTimeout",
-                            data={
-                                "mint": mint,
-                                "symbol": watch_context.get("symbol", "UNKNOWN"),
-                                "decision": watch_context.get("decision"),
-                                "initial_score": watch_context.get("initial_score"),
-                                "initial_confidence": watch_context.get("initial_confidence"),
-                                "elapsed_seconds": int(elapsed),
-                                "timeout_seconds": self.pool_timeout,
-                                "watch_started_at": watch_context.get("watch_started_at"),
-                            },
-                            source="RaydiumListener",
-                            timestamp=datetime.utcnow(),
-                        )
-                        await self.event_bus.emit(timeout_event)
-                        await self.stop_monitoring(mint)
+        try:
+            while self.running:
+                try:
+                    mints_to_check = list(self.monitored_tokens.keys())
+                    if not mints_to_check:
+                        await asyncio.sleep(5)
                         continue
 
-                    pool_data = self._lookup_token_in_index(mint, pool_index)
-                    if pool_data:
-                        await self._handle_pool_found(mint, pool_data)
+                    pools = await self._fetch_raydium_pools()
+                    pool_index: Dict[str, Dict[str, Any]] = (
+                        self._build_pool_index(pools) if pools else {}
+                    )
 
-                        pool_event = Event(
-                            event_type="PoolFound",
-                            data={
-                                "mint": mint,
-                                "symbol": watch_context.get("symbol", "UNKNOWN"),
-                                "decision": watch_context.get("decision"),
-                                "initial_score": watch_context.get("initial_score"),
-                                "initial_confidence": watch_context.get("initial_confidence"),
-                                "watch_started_at": watch_context.get("watch_started_at"),
-                                "elapsed_seconds": int(elapsed),
-                                "pool_found_at": datetime.utcnow().isoformat(),
-                                "pool": pool_data,
-                            },
-                            source="RaydiumListener",
-                            timestamp=datetime.utcnow(),
+                    for mint in mints_to_check:
+                        watch_context = self.monitored_tokens.get(mint, {})
+                        start_time = watch_context.get(
+                            "watch_started_at",
+                            datetime.utcnow().timestamp(),
                         )
-                        await self.event_bus.emit(pool_event)
+                        elapsed = datetime.utcnow().timestamp() - start_time
 
-                await asyncio.sleep(5)
+                        if elapsed > self.pool_timeout:
+                            self.pools_missed += 1
+                            logger.warning(
+                                f"Pool search timeout for {mint[:8]}... (elapsed: {elapsed:.0f}s)"
+                            )
 
-            except asyncio.CancelledError:
-                logger.info("Pool monitor cancelled")
-                break
-            except Exception as e:
-                logger.error(f"Error in pool monitor: {e}")
-                await asyncio.sleep(5)
+                            timeout_event = Event(
+                                event_type="PoolSearchTimeout",
+                                data={
+                                    "mint": mint,
+                                    "symbol": watch_context.get("symbol", "UNKNOWN"),
+                                    "decision": watch_context.get("decision"),
+                                    "initial_score": watch_context.get("initial_score"),
+                                    "initial_confidence": watch_context.get("initial_confidence"),
+                                    "elapsed_seconds": int(elapsed),
+                                    "timeout_seconds": self.pool_timeout,
+                                    "watch_started_at": watch_context.get("watch_started_at"),
+                                },
+                                source="RaydiumListener",
+                                timestamp=datetime.utcnow(),
+                            )
+                            await self.event_bus.emit(timeout_event)
+                            await self.stop_monitoring(mint)
+                            continue
+
+                        pool_data = self._lookup_token_in_index(mint, pool_index)
+                        if pool_data:
+                            await self._handle_pool_found(mint, pool_data)
+
+                            pool_event = Event(
+                                event_type="PoolFound",
+                                data={
+                                    "mint": mint,
+                                    "symbol": watch_context.get("symbol", "UNKNOWN"),
+                                    "decision": watch_context.get("decision"),
+                                    "initial_score": watch_context.get("initial_score"),
+                                    "initial_confidence": watch_context.get("initial_confidence"),
+                                    "watch_started_at": watch_context.get("watch_started_at"),
+                                    "elapsed_seconds": int(elapsed),
+                                    "pool_found_at": datetime.utcnow().isoformat(),
+                                    "pool": pool_data,
+                                },
+                                source="RaydiumListener",
+                                timestamp=datetime.utcnow(),
+                            )
+                            await self.event_bus.emit(pool_event)
+
+                    await asyncio.sleep(5)
+
+                except asyncio.CancelledError:
+                    logger.info("Pool monitor cancelled")
+                    raise
+                except Exception as e:
+                    logger.error(f"Error in pool monitor: {e}")
+                    await asyncio.sleep(5)
+        finally:
+            self.running = False
+            logger.info("Raydium pool monitor stopped")
 
     def get_stats(self) -> dict:
         """Get listener statistics."""
         return {
+            "running": self.running,
             "pools_found": self.pools_found,
             "pools_missed": self.pools_missed,
             "currently_monitoring": len(self.monitored_tokens),
@@ -312,5 +327,9 @@ class RaydiumListener:
 
     async def close(self) -> None:
         """Close HTTP client."""
+        await self.stop()
+        self.monitored_tokens.clear()
+
         if self.http_client:
             await self.http_client.aclose()
+            self.http_client = None
