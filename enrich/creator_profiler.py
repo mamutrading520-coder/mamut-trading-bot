@@ -106,23 +106,41 @@ class CreatorProfiler:
             normalized_creator = (creator or "").strip()
             creator_resolved = normalized_creator not in {"", "UNKNOWN", "unknown"}
 
-            risk_score, analysis = self._get_creator_risk_score(creator)
-            
-            # Store or update creator profile only when creator is genuinely known
-            if creator_resolved:
-                profile_updates = {
-                    "total_tokens": analysis["total_tokens"] + 1,
-                    "wallet_age_days": analysis["wallet_age_days"],
-                    "risk_level": self._get_risk_level(risk_score),
-                    "last_token_date": datetime.utcnow(),
+            if not creator_resolved:
+                self.analyzed_count += 1
+                return {
+                    "creator": creator,
+                    "mint": mint,
+                    "risk_score": 50.0,
+                    "risk_level": "MEDIUM",
+                    "analysis": {
+                        "total_tokens": 0,
+                        "successful_tokens": 0,
+                        "wallet_age_days": None,
+                        "is_blacklisted": False,
+                        "is_trusted": False,
+                        "reasons": ["Creator no resuelto"],
+                        "warnings": ["Creator identity unavailable"],
+                    },
+                    "creator_resolved": False,
+                    "timestamp": datetime.utcnow().isoformat(),
                 }
-                # Record first_token_date when creating a new profile
-                if analysis["total_tokens"] == 0:
-                    profile_updates["first_token_date"] = datetime.utcnow()
-                self.store.upsert_creator_profile(creator, profile_updates)
+
+            risk_score, analysis = self._get_creator_risk_score(creator)
+
+            profile_updates = {
+                "total_tokens": analysis["total_tokens"] + 1,
+                "wallet_age_days": analysis["wallet_age_days"],
+                "risk_level": self._get_risk_level(risk_score),
+                "last_token_date": datetime.utcnow(),
+            }
+            # Record first_token_date when creating a new profile
+            if analysis["total_tokens"] == 0:
+                profile_updates["first_token_date"] = datetime.utcnow()
+            self.store.upsert_creator_profile(creator, profile_updates)
             
             self.analyzed_count += 1
-            logger.debug(f"Profiled creator {normalized_creator[:8] if creator_resolved else '?'}... risk={risk_score:.1f}")
+            logger.debug(f"Profiled creator {normalized_creator[:8]}... risk={risk_score:.1f}")
             
             return {
                 "creator": creator,
