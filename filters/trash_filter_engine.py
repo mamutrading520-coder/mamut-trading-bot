@@ -204,26 +204,54 @@ class TrashFilterEngine:
             creator_balance = float(token_data.get("creator_balance", 0) or 0)
             total_supply = float(token_data.get("total_supply", 0) or 0)
             holder_count = int(token_data.get("holder_count", 0) or 0)
+            creator_hold_percentage = float(token_data.get("creator_hold_percentage", 0.0) or 0.0)
+            top_holder_percentage = float(token_data.get("top_holder_percentage", 0.0) or 0.0)
+            top_5_holders_percentage = float(token_data.get("top_5_holders_percentage", 0.0) or 0.0)
+            top_10_holders_percentage = float(token_data.get("top_10_holders_percentage", 0.0) or 0.0)
 
             risk_score = 35.0
-            creator_percentage = 0.0
             reasons: List[str] = []
             warnings: List[str] = []
 
-            if total_supply > 0:
+            # Prefer on-chain creator_hold_percentage when available; fall back to
+            # the legacy creator_balance / total_supply calculation.
+            if creator_hold_percentage > 0:
+                creator_percentage = creator_hold_percentage
+                has_supply_info = True
+            elif total_supply > 0:
                 creator_percentage = (creator_balance / total_supply) * 100
+                has_supply_info = True
+            else:
+                creator_percentage = 0.0
+                has_supply_info = False
 
-                if creator_percentage > 90:
-                    risk_score = 95.0
-                    reasons.append("Creator controla >90% del supply")
-                elif creator_percentage > 70:
-                    risk_score = 80.0
-                    reasons.append("Creator controla >70% del supply")
-                elif creator_percentage > 50:
-                    risk_score = 65.0
-                    warnings.append("Creator controla >50% del supply")
-                elif creator_percentage < 20:
-                    risk_score = 25.0
+            if creator_percentage > 90:
+                risk_score = 95.0
+                reasons.append("Creator controla >90% del supply")
+            elif creator_percentage > 70:
+                risk_score = 80.0
+                reasons.append("Creator controla >70% del supply")
+            elif creator_percentage > 50:
+                risk_score = 65.0
+                warnings.append("Creator controla >50% del supply")
+            elif has_supply_info and creator_percentage < 20:
+                risk_score = 25.0
+
+            # Top-holder whale risk (independent of creator concentration)
+            if top_holder_percentage >= 35:
+                risk_score += 15.0
+                warnings.append(f"Top holder controla {top_holder_percentage:.1f}% del supply")
+            elif top_holder_percentage >= 20:
+                risk_score += 8.0
+                warnings.append(f"Top holder concentrado ({top_holder_percentage:.1f}%)")
+
+            # Top-5 holder cluster risk
+            if top_5_holders_percentage >= 70:
+                risk_score += 12.0
+                warnings.append(f"Top-5 holders controlan {top_5_holders_percentage:.1f}%")
+            elif top_5_holders_percentage >= 50:
+                risk_score += 6.0
+                warnings.append(f"Top-5 holders elevado ({top_5_holders_percentage:.1f}%)")
 
             if holder_count > 100:
                 risk_score -= 15.0
@@ -241,6 +269,9 @@ class TrashFilterEngine:
                 "score": risk_score,
                 "creator_percentage": creator_percentage,
                 "holder_count": holder_count,
+                "top_holder_percentage": top_holder_percentage,
+                "top_5_holders_percentage": top_5_holders_percentage,
+                "top_10_holders_percentage": top_10_holders_percentage,
                 "reasons": reasons,
                 "warnings": warnings,
             }
@@ -251,6 +282,9 @@ class TrashFilterEngine:
                 "score": 50.0,
                 "creator_percentage": 0.0,
                 "holder_count": 0,
+                "top_holder_percentage": 0.0,
+                "top_5_holders_percentage": 0.0,
+                "top_10_holders_percentage": 0.0,
                 "reasons": [f"Concentration risk error: {e}"],
                 "warnings": [],
             }
