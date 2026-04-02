@@ -53,6 +53,11 @@ HIGH_POTENTIAL_SCORE = _env_float("SCORE_THRESHOLD_HIGH_POTENTIAL", 70.0)
 MEDIUM_POTENTIAL_SCORE = _env_float("SCORE_THRESHOLD_MEDIUM_POTENTIAL", 50.0)
 LOW_POTENTIAL_SCORE = _env_float("SCORE_THRESHOLD_LOW_POTENTIAL", 30.0)
 
+SIGNAL_EARLY_MIN_CONFIDENCE = _env_float("SIGNAL_EARLY_MIN_CONFIDENCE", 0.65)
+SIGNAL_EARLY_MAX_AGGREGATE_RISK = _env_float("SIGNAL_EARLY_MAX_AGGREGATE_RISK", 45.0)
+MONITOR_MIN_CONFIDENCE = _env_float("MONITOR_MIN_CONFIDENCE", 0.45)
+MONITOR_MAX_AGGREGATE_RISK = _env_float("MONITOR_MAX_AGGREGATE_RISK", 65.0)
+
 AUTHORITY_RISK_MAX = _env_float("AUTHORITY_RISK_MAX", 80.0)
 CREATOR_RISK_MAX = _env_float("CREATOR_RISK_MAX", 85.0)
 CONCENTRATION_RISK_MAX = _env_float("CONCENTRATION_MAX", 80.0)
@@ -181,7 +186,11 @@ SCORING_THRESHOLDS = {
 # Decision Mapping Thresholds
 DECISION_THRESHOLDS = {
     "signal_early_min_score": HIGH_POTENTIAL_SCORE,
+    "signal_early_min_confidence": SIGNAL_EARLY_MIN_CONFIDENCE,
+    "signal_early_max_aggregate_risk": SIGNAL_EARLY_MAX_AGGREGATE_RISK,
     "monitor_min_score": MEDIUM_POTENTIAL_SCORE,
+    "monitor_min_confidence": MONITOR_MIN_CONFIDENCE,
+    "monitor_max_aggregate_risk": MONITOR_MAX_AGGREGATE_RISK,
     "reject_max_score": LOW_POTENTIAL_SCORE,
 }
 
@@ -204,9 +213,11 @@ RAYDIUM_VALIDATION_CONFIG = {
 # Signal Generation Thresholds
 SIGNAL_THRESHOLDS = {
     "min_early_score": HIGH_POTENTIAL_SCORE,
+    "min_early_confidence": SIGNAL_EARLY_MIN_CONFIDENCE,
+    "max_early_aggregate_risk": SIGNAL_EARLY_MAX_AGGREGATE_RISK,
     "min_confirmation_score": _env_float("MIN_CONFIRMATION_SCORE", 65.0),
     "max_abandon_score": 40,
-    "early_signal_confidence": _env_float("EARLY_SIGNAL_CONFIDENCE", 0.8),
+    "early_signal_confidence": SIGNAL_EARLY_MIN_CONFIDENCE,
 }
 
 # Market Confirmation Thresholds

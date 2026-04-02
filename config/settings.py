@@ -10,11 +10,15 @@ from config.thresholds import (
     CONCENTRATION_RISK_MAX,
     CREATOR_RISK_MAX,
     HIGH_POTENTIAL_SCORE,
-    MEDIUM_POTENTIAL_SCORE,
     LOW_POTENTIAL_SCORE,
+    MEDIUM_POTENTIAL_SCORE,
+    MONITOR_MAX_AGGREGATE_RISK,
+    MONITOR_MIN_CONFIDENCE,
     RAYDIUM_MIN_LIQUIDITY_SOL,
     RAYDIUM_POOL_TIMEOUT_SECONDS,
     SIGNAL_DEDUP_WINDOW_SECONDS,
+    SIGNAL_EARLY_MAX_AGGREGATE_RISK,
+    SIGNAL_EARLY_MIN_CONFIDENCE,
     TOKEN_LOCK_TIMEOUT_SECONDS,
 )
 
@@ -46,6 +50,12 @@ class Settings(BaseSettings):
     score_threshold_high_potential: float = HIGH_POTENTIAL_SCORE
     score_threshold_medium_potential: float = MEDIUM_POTENTIAL_SCORE
     score_threshold_low_potential: float = LOW_POTENTIAL_SCORE
+
+    # Decision gates
+    signal_early_min_confidence: float = SIGNAL_EARLY_MIN_CONFIDENCE
+    signal_early_max_aggregate_risk: float = SIGNAL_EARLY_MAX_AGGREGATE_RISK
+    monitor_min_confidence: float = MONITOR_MIN_CONFIDENCE
+    monitor_max_aggregate_risk: float = MONITOR_MAX_AGGREGATE_RISK
 
     # Risk Thresholds
     authority_risk_max: float = AUTHORITY_RISK_MAX

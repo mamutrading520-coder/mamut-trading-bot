@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Dict, Any, Optional
 from datetime import datetime
+from typing import Any, Dict, Optional
 
 from monitoring.logger import setup_logger
 from config.settings import Settings
@@ -92,17 +92,28 @@ class DecisionMapper:
         medium_threshold = float(self.settings.score_threshold_medium_potential)
         low_threshold = float(self.settings.score_threshold_low_potential)
 
-        # Gating by both score and confidence, with extra caution on residual risk
-        if final_score >= high_threshold and confidence >= 0.65 and aggregate_risk <= 45:
+        signal_early_min_confidence = float(self.settings.signal_early_min_confidence)
+        signal_early_max_aggregate_risk = float(self.settings.signal_early_max_aggregate_risk)
+        monitor_min_confidence = float(self.settings.monitor_min_confidence)
+        monitor_max_aggregate_risk = float(self.settings.monitor_max_aggregate_risk)
+
+        if (
+            final_score >= high_threshold
+            and confidence >= signal_early_min_confidence
+            and aggregate_risk <= signal_early_max_aggregate_risk
+        ):
             decision = "SIGNAL_EARLY"
-        elif final_score >= medium_threshold and confidence >= 0.45 and aggregate_risk <= 65:
+        elif (
+            final_score >= medium_threshold
+            and confidence >= monitor_min_confidence
+            and aggregate_risk <= monitor_max_aggregate_risk
+        ):
             decision = "MONITOR"
         elif final_score >= low_threshold:
             decision = "WARN"
         else:
             decision = "REJECT"
 
-        # Block SIGNAL_EARLY when creator identity could not be resolved
         if decision == "SIGNAL_EARLY" and score_analysis.get("creator_resolved") is False:
             decision = "MONITOR"
             logger.debug(
@@ -123,6 +134,14 @@ class DecisionMapper:
             "aggregate_risk_score": aggregate_risk,
             "score_breakdown": score_analysis.get("score_breakdown", {}),
             "reasoning": self._make_reasoning(score_analysis, decision),
+            "decision_gates": {
+                "signal_early_min_score": high_threshold,
+                "signal_early_min_confidence": signal_early_min_confidence,
+                "signal_early_max_aggregate_risk": signal_early_max_aggregate_risk,
+                "monitor_min_score": medium_threshold,
+                "monitor_min_confidence": monitor_min_confidence,
+                "monitor_max_aggregate_risk": monitor_max_aggregate_risk,
+            },
             "timestamp": datetime.utcnow().isoformat(),
         }
 
@@ -176,7 +195,7 @@ class DecisionMapper:
             await self.event_bus.emit(decision_event)
             logger.info(
                 f"DecisionMade emitted: {decision['decision']} "
-                f"(score={decision['final_score']:.2f}, conf={decision['confidence']:.2f})"
+                f"(score={decision['final_score']:.2f}, conf={decision['confidence']:.2f}, risk={decision['aggregate_risk_score']:.2f})"
             )
             return decision["decision"]
 
