@@ -128,13 +128,13 @@ class Orchestrator:
     def _safe_store_call(
         self,
         description: str,
-        operation: Callable[..., Any],
+        store_call: Callable[..., Any],
         *args: Any,
         **kwargs: Any,
     ) -> None:
         """Execute a synchronous store call without breaking the pipeline."""
         try:
-            operation(*args, **kwargs)
+            store_call(*args, **kwargs)
         except Exception as e:
             logger.error(f"Persistence error during {description}: {e}")
 
