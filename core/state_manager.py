@@ -46,6 +46,8 @@ class StateManager:
         self.lifecycle_updates: int = 0
         self.abandoned_tokens: int = 0
         self.failed_updates: int = 0
+        self.failed_tokens: int = 0
+        self.evicted_tokens: int = 0
 
     async def initialize_token(
         self,
@@ -53,10 +55,6 @@ class StateManager:
         name: Optional[str] = None,
         symbol: Optional[str] = None,
     ) -> bool:
-        """
-        Inicializa un token en memoria y en persistencia.
-        Si el token ya existe, no lo duplica.
-        """
         if not mint:
             logger.error("initialize_token called without mint")
             self.failed_updates += 1
@@ -113,11 +111,6 @@ class StateManager:
         event: Optional[str] = None,
         reason: Optional[str] = None,
     ) -> bool:
-        """
-        Actualiza el estado actual del token en memoria y persistencia.
-        Registra primero la transición de lifecycle y después consolida
-        el estado actual en memoria y en la tabla tokens.
-        """
         if not mint:
             logger.error("update_token_state called without mint")
             self.failed_updates += 1
@@ -165,11 +158,6 @@ class StateManager:
             return False
 
     async def mark_abandoned(self, mint: str, reason: str) -> bool:
-        """
-        Marca un token como abandonado/rechazado y persiste la razón.
-        Registra primero la transición en token_lifecycle y después
-        consolida el estado actual en memoria y en la tabla tokens.
-        """
         if not mint:
             logger.error("mark_abandoned called without mint")
             self.failed_updates += 1
@@ -208,10 +196,52 @@ class StateManager:
             self.failed_updates += 1
             return False
 
+    async def mark_failed(
+        self,
+        mint: str,
+        stage: str,
+        reason: str,
+        details: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        if not mint:
+            logger.error("mark_failed called without mint")
+            self.failed_updates += 1
+            return False
+
+        failure_reason = f"{stage}: {reason}" if stage else reason
+
+        try:
+            self._record_lifecycle(
+                mint=mint,
+                new_status="FAILED",
+                event=stage or "PipelineError",
+                reason=failure_reason,
+                details=details,
+            )
+
+            self.token_states[mint] = "FAILED"
+
+            try:
+                self.store.update_token(
+                    mint,
+                    {
+                        "lifecycle_status": "FAILED",
+                        "rejection_reason": failure_reason,
+                    },
+                )
+            except Exception as db_error:
+                logger.warning(f"Could not persist failed state for {mint[:8]}...: {db_error}")
+
+            self.failed_tokens += 1
+            logger.debug(f"Token {mint[:8]}... failed at {stage}: {reason}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Error marking token failed {mint[:8]}...: {e}")
+            self.failed_updates += 1
+            return False
+
     async def mark_early_signal_sent(self, mint: str) -> bool:
-        """
-        Marca que ya se despachó una señal temprana.
-        """
         updated = await self.update_token_state(
             mint=mint,
             state="EARLY_SIGNAL_SENT",
@@ -221,16 +251,19 @@ class StateManager:
             self.early_signals_sent += 1
         return updated
 
+    def evict_token_state(self, mint: str) -> bool:
+        if mint not in self.token_states:
+            return False
+
+        del self.token_states[mint]
+        self.evicted_tokens += 1
+        logger.debug(f"Token {mint[:8]}... evicted from in-memory state cache")
+        return True
+
     async def get_state(self, mint: str) -> Optional[str]:
-        """
-        Devuelve el estado actual del token desde memoria.
-        """
         return self.token_states.get(mint)
 
     def get_stats(self) -> dict:
-        """
-        Devuelve estadísticas operativas del gestor de estados.
-        """
         state_counts: Dict[str, int] = {}
         for state in self.token_states.values():
             state_counts[state] = state_counts.get(state, 0) + 1
@@ -241,15 +274,13 @@ class StateManager:
             "lifecycle_updates": self.lifecycle_updates,
             "abandoned_tokens": self.abandoned_tokens,
             "failed_updates": self.failed_updates,
+            "failed_tokens": self.failed_tokens,
+            "evicted_tokens": self.evicted_tokens,
             "states": dict(self.token_states),
             "state_counts": state_counts,
         }
 
     def _normalize_state(self, state: str) -> str:
-        """
-        Normaliza estados para evitar basura tipográfica
-        sin bloquear estados nuevos del pipeline.
-        """
         normalized = (state or "").strip().upper()
         if not normalized:
             return "FAILED"
@@ -267,9 +298,6 @@ class StateManager:
         reason: Optional[str] = None,
         details: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """
-        Persiste la transición en token_lifecycle si el store lo soporta.
-        """
         details_json = None
 
         if details:

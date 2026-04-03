@@ -138,9 +138,108 @@ class Orchestrator:
         except Exception as e:
             logger.error(f"Persistence error during {description}: {e}")
 
+    def _record_pipeline_metric(
+        self,
+        operation: str,
+        mint: Optional[str] = None,
+        success: bool = True,
+        error_message: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Persist coarse operational metrics without interrupting the pipeline."""
+        self._safe_store_call(
+            f"pipeline metric {operation}",
+            self.store.create_performance_metric,
+            operation=operation,
+            mint=mint,
+            duration_ms=0.0,
+            success=success,
+            error_message=error_message,
+            metadata=metadata or {},
+        )
+
+    def _clear_token_runtime(self, mint: str, keep_initial_signal: bool = False) -> None:
+        """Remove per-token runtime caches once the token cycle is finished."""
+        cleared = []
+
+        if self.token_context.pop(mint, None) is not None:
+            cleared.append("token_context")
+        if self.pool_validations.pop(mint, None) is not None:
+            cleared.append("pool_validations")
+        if self.market_confirmations.pop(mint, None) is not None:
+            cleared.append("market_confirmations")
+        if not keep_initial_signal and self.initial_signals.pop(mint, None) is not None:
+            cleared.append("initial_signals")
+
+        if cleared:
+            logger.debug(f"Cleared runtime cache for {mint[:8]}...: {', '.join(cleared)}")
+
+    async def _finalize_token_runtime(
+        self,
+        mint: str,
+        stop_raydium: bool = False,
+        keep_initial_signal: bool = False,
+        release_reason: str = "terminal",
+        evict_state: bool = False,
+    ) -> None:
+        """Finalize a token runtime cycle: stop monitoring, release lock, clear caches."""
+        if stop_raydium:
+            await self._stop_raydium_watch(mint)
+
+        self.lock_manager.unlock_token(mint, reason=release_reason)
+        self._clear_token_runtime(mint, keep_initial_signal=keep_initial_signal)
+
+        if evict_state:
+            self.state_manager.evict_token_state(mint)
+
+    async def _handle_stage_failure(
+        self,
+        stage: str,
+        mint: Optional[str],
+        error: Exception,
+        details: Optional[Dict[str, Any]] = None,
+        stop_raydium: bool = False,
+        keep_initial_signal: bool = False,
+    ) -> None:
+        """Centralized runtime hardening for unexpected stage failures."""
+        error_message = str(error)
+
+        if mint:
+            logger.error(f"Error handling {stage} for {mint[:8]}...: {error_message}")
+        else:
+            logger.error(f"Error handling {stage}: {error_message}")
+
+        self._record_pipeline_metric(
+            operation=f"stage_error_{stage.lower()}",
+            mint=mint,
+            success=False,
+            error_message=error_message,
+            metadata={
+                "stage": stage,
+                "has_details": bool(details),
+            },
+        )
+
+        if not mint:
+            return
+
+        await self.state_manager.mark_failed(
+            mint=mint,
+            stage=stage,
+            reason=error_message,
+            details=details,
+        )
+        await self._finalize_token_runtime(
+            mint=mint,
+            stop_raydium=stop_raydium,
+            keep_initial_signal=keep_initial_signal,
+            release_reason=f"stage_failed:{stage}",
+            evict_state=True,
+        )
+
     async def _handle_token_discovered(self, event: Event) -> None:
+        mint = (event.data or {}).get("mint")
         try:
-            mint = event.data.get("mint")
             if not mint:
                 logger.warning("TokenDiscovered without mint")
                 return
@@ -157,8 +256,10 @@ class Orchestrator:
                 symbol=symbol,
             )
             if not initialized:
-                self.lock_manager.unlock_token(mint)
+                self.lock_manager.unlock_token(mint, reason="initialize_failed")
                 return
+
+            self.tokens_processed += 1
 
             self._safe_store_call(
                 f"base token persistence for {mint[:8]}...",
@@ -173,11 +274,17 @@ class Orchestrator:
                 await self.token_enricher.enrich_and_emit(event)
 
         except Exception as e:
-            logger.error(f"Error handling TokenDiscovered: {e}")
+            await self._handle_stage_failure(
+                "TokenDiscovered",
+                mint,
+                e,
+                details=event.data,
+                stop_raydium=False,
+            )
 
     async def _handle_token_parsed(self, event: Event) -> None:
+        mint = (event.data or {}).get("mint")
         try:
-            mint = event.data.get("mint")
             if not mint:
                 return
 
@@ -190,11 +297,11 @@ class Orchestrator:
             )
 
         except Exception as e:
-            logger.error(f"Error handling TokenParsed: {e}")
+            await self._handle_stage_failure("TokenParsed", mint, e, details=event.data)
 
     async def _handle_token_enriched(self, event: Event) -> None:
+        mint = (event.data or {}).get("mint")
         try:
-            mint = event.data.get("mint")
             if not mint:
                 return
 
@@ -218,11 +325,11 @@ class Orchestrator:
                 await self.creator_profiler.profile_and_emit(event)
 
         except Exception as e:
-            logger.error(f"Error handling TokenEnriched: {e}")
+            await self._handle_stage_failure("TokenEnriched", mint, e, details=event.data)
 
     async def _handle_creator_profiled(self, event: Event) -> None:
+        mint = (event.data or {}).get("mint")
         try:
-            mint = event.data.get("mint")
             if not mint:
                 return
 
@@ -239,11 +346,11 @@ class Orchestrator:
                 await self.trash_filter.filter_and_emit(event)
 
         except Exception as e:
-            logger.error(f"Error handling CreatorProfiled: {e}")
+            await self._handle_stage_failure("CreatorProfiled", mint, e, details=event.data)
 
     async def _handle_token_passed(self, event: Event) -> None:
+        mint = (event.data or {}).get("mint")
         try:
-            mint = event.data.get("mint")
             if not mint:
                 return
 
@@ -267,11 +374,11 @@ class Orchestrator:
                 await self.score_engine.score_and_emit(event)
 
         except Exception as e:
-            logger.error(f"Error handling TokenPassed: {e}")
+            await self._handle_stage_failure("TokenPassed", mint, e, details=event.data)
 
     async def _handle_token_rejected(self, event: Event) -> None:
+        mint = (event.data or {}).get("mint")
         try:
-            mint = event.data.get("mint")
             if not mint:
                 return
 
@@ -286,15 +393,31 @@ class Orchestrator:
             )
 
             await self.state_manager.mark_abandoned(mint, reason)
-            await self._stop_raydium_watch(mint)
-            self.lock_manager.unlock_token(mint)
+            self._record_pipeline_metric(
+                operation="token_rejected",
+                mint=mint,
+                success=True,
+                metadata={"reason": reason},
+            )
+            await self._finalize_token_runtime(
+                mint=mint,
+                stop_raydium=True,
+                release_reason="rejected",
+                evict_state=True,
+            )
 
         except Exception as e:
-            logger.error(f"Error handling TokenRejected: {e}")
+            await self._handle_stage_failure(
+                "TokenRejected",
+                mint,
+                e,
+                details=event.data,
+                stop_raydium=True,
+            )
 
     async def _handle_score_calculated(self, event: Event) -> None:
+        mint = (event.data or {}).get("mint")
         try:
-            mint = event.data.get("mint")
             if not mint:
                 return
 
@@ -324,11 +447,11 @@ class Orchestrator:
                 await self.decision_mapper.map_and_emit(event)
 
         except Exception as e:
-            logger.error(f"Error handling ScoreCalculated: {e}")
+            await self._handle_stage_failure("ScoreCalculated", mint, e, details=event.data)
 
     async def _handle_decision_made(self, event: Event) -> None:
+        mint = (event.data or {}).get("mint")
         try:
-            mint = event.data.get("mint")
             if not mint:
                 return
 
@@ -354,14 +477,26 @@ class Orchestrator:
                 await self._start_raydium_watch(mint)
 
             elif decision in {"REJECT", "IGNORE", "NO_SIGNAL"}:
-                self.lock_manager.unlock_token(mint)
+                await self._finalize_token_runtime(
+                    mint=mint,
+                    stop_raydium=False,
+                    release_reason=f"decision:{decision.lower()}",
+                    evict_state=True,
+                )
 
         except Exception as e:
-            logger.error(f"Error handling DecisionMade: {e}")
+            await self._handle_stage_failure(
+                "DecisionMade",
+                mint,
+                e,
+                details=event.data,
+                stop_raydium=False,
+                keep_initial_signal=True,
+            )
 
     async def _handle_signal_generated(self, event: Event) -> None:
+        mint = (event.data or {}).get("mint")
         try:
-            mint = event.data.get("mint")
             if not mint:
                 return
 
@@ -388,21 +523,49 @@ class Orchestrator:
                 details=event.data,
             )
 
+            self._record_pipeline_metric(
+                operation="signal_generated",
+                mint=mint,
+                success=True,
+                metadata={
+                    "signal_type": signal_type,
+                    "score": event.data.get("score"),
+                },
+            )
+
             if self.alert_dispatcher:
                 await self.alert_dispatcher.dispatch_and_emit(event)
 
         except Exception as e:
             logger.error(f"Error handling SignalGenerated: {e}")
+            self._record_pipeline_metric(
+                operation="signal_generated",
+                mint=mint,
+                success=False,
+                error_message=str(e),
+                metadata={"stage": "SignalGenerated"},
+            )
 
     async def _handle_alert_dispatched(self, event: Event) -> None:
+        mint = (event.data or {}).get("mint")
         try:
-            mint = event.data.get("mint")
             if not mint:
                 return
 
             signal_type = event.data.get("signal_type", "UNKNOWN")
             dispatch_success = bool(event.data.get("success", False))
             self._merge_token_context(mint, event.data)
+
+            self._record_pipeline_metric(
+                operation="alert_dispatched",
+                mint=mint,
+                success=dispatch_success,
+                error_message=None if dispatch_success else "dispatch_failed",
+                metadata={
+                    "signal_type": signal_type,
+                    "success": dispatch_success,
+                },
+            )
 
             if not dispatch_success:
                 logger.warning(f"Alert dispatch failed for {mint[:8]}... ({signal_type})")
@@ -417,13 +580,27 @@ class Orchestrator:
 
             if signal_type == "EARLY":
                 await self.state_manager.mark_early_signal_sent(mint)
+            elif signal_type == "CONFIRMED":
+                await self._finalize_token_runtime(
+                    mint=mint,
+                    stop_raydium=False,
+                    release_reason="confirmed_dispatched",
+                    evict_state=True,
+                )
 
         except Exception as e:
             logger.error(f"Error handling AlertDispatched: {e}")
+            self._record_pipeline_metric(
+                operation="alert_dispatched",
+                mint=mint,
+                success=False,
+                error_message=str(e),
+                metadata={"stage": "AlertDispatched"},
+            )
 
     async def _handle_pool_found(self, event: Event) -> None:
+        mint = (event.data or {}).get("mint")
         try:
-            mint = event.data.get("mint")
             if not mint:
                 return
 
@@ -471,8 +648,18 @@ class Orchestrator:
                     details=validation_result or {"pool": pool_data},
                     reason="Pool validation failed",
                 )
-                await self._stop_raydium_watch(mint)
-                self.lock_manager.unlock_token(mint)
+                self._record_pipeline_metric(
+                    operation="pool_invalid",
+                    mint=mint,
+                    success=True,
+                    metadata={"has_validation_result": bool(validation_result)},
+                )
+                await self._finalize_token_runtime(
+                    mint=mint,
+                    stop_raydium=True,
+                    release_reason="pool_invalid",
+                    evict_state=True,
+                )
                 return
 
             await self.state_manager.update_token_state(
@@ -504,7 +691,22 @@ class Orchestrator:
             self.market_confirmations[mint] = confirmation or {}
 
             if not confirmation or not confirmation.get("is_confirmed", False):
-                self.lock_manager.unlock_token(mint)
+                self._record_pipeline_metric(
+                    operation="market_not_confirmed",
+                    mint=mint,
+                    success=True,
+                    metadata={
+                        "decision": token_context.get("decision"),
+                        "had_confirmation_payload": bool(confirmation),
+                    },
+                )
+                await self._finalize_token_runtime(
+                    mint=mint,
+                    stop_raydium=True,
+                    keep_initial_signal=False,
+                    release_reason="market_not_confirmed",
+                    evict_state=True,
+                )
                 return
 
             market_event = Event(
@@ -516,11 +718,17 @@ class Orchestrator:
             await self.event_bus.emit(market_event)
 
         except Exception as e:
-            logger.error(f"Error handling PoolFound: {e}")
+            await self._handle_stage_failure(
+                "PoolFound",
+                mint,
+                e,
+                details=event.data,
+                stop_raydium=True,
+            )
 
     async def _handle_pool_timeout(self, event: Event) -> None:
+        mint = (event.data or {}).get("mint")
         try:
-            mint = event.data.get("mint")
             if not mint:
                 return
 
@@ -541,15 +749,31 @@ class Orchestrator:
                 event.data,
             )
 
-            await self._stop_raydium_watch(mint)
-            self.lock_manager.unlock_token(mint)
+            self._record_pipeline_metric(
+                operation="pool_timeout",
+                mint=mint,
+                success=True,
+                metadata={"elapsed_seconds": event.data.get("elapsed_seconds")},
+            )
+            await self._finalize_token_runtime(
+                mint=mint,
+                stop_raydium=True,
+                release_reason="pool_timeout",
+                evict_state=True,
+            )
 
         except Exception as e:
-            logger.error(f"Error handling PoolSearchTimeout: {e}")
+            await self._handle_stage_failure(
+                "PoolSearchTimeout",
+                mint,
+                e,
+                details=event.data,
+                stop_raydium=True,
+            )
 
     async def _handle_market_confirmed(self, event: Event) -> None:
+        mint = (event.data or {}).get("mint")
         try:
-            mint = event.data.get("mint")
             if not mint:
                 return
 
@@ -569,6 +793,16 @@ class Orchestrator:
                 event.data,
             )
 
+            self._record_pipeline_metric(
+                operation="market_confirmed",
+                mint=mint,
+                success=True,
+                metadata={
+                    "score": event.data.get("score"),
+                    "new_confidence": event.data.get("new_confidence"),
+                },
+            )
+
             if self.signal_engine:
                 await self.signal_engine.generate_confirmed_and_emit(
                     event=event,
@@ -576,10 +810,16 @@ class Orchestrator:
                 )
 
             await self._stop_raydium_watch(mint)
-            self.lock_manager.unlock_token(mint)
+            self.lock_manager.unlock_token(mint, reason="market_confirmed")
 
         except Exception as e:
-            logger.error(f"Error handling MarketConfirmed: {e}")
+            await self._handle_stage_failure(
+                "MarketConfirmed",
+                mint,
+                e,
+                details=event.data,
+                stop_raydium=True,
+            )
 
     async def _start_raydium_watch(self, mint: str) -> None:
         try:
@@ -601,6 +841,13 @@ class Orchestrator:
 
         except Exception as e:
             logger.error(f"Error starting Raydium watch for {mint[:8]}...: {e}")
+            self._record_pipeline_metric(
+                operation="raydium_watch_start",
+                mint=mint,
+                success=False,
+                error_message=str(e),
+            )
+            raise
 
     async def _stop_raydium_watch(self, mint: str) -> None:
         try:
@@ -706,8 +953,10 @@ class Orchestrator:
     async def _process_tokens(self) -> None:
         while self.running:
             try:
-                self.lock_manager.cleanup_expired_locks()
+                expired_count = self.lock_manager.cleanup_expired_locks()
                 self.signal_deduper.cleanup_old_signals()
+                if expired_count:
+                    logger.debug(f"Expired locks cleaned during maintenance: {expired_count}")
                 await asyncio.sleep(5)
             except asyncio.CancelledError:
                 logger.info("Token processor cancelled")
@@ -757,6 +1006,11 @@ class Orchestrator:
 
                 if self.alert_dispatcher:
                     await self.alert_dispatcher.close()
+
+                self.token_context.clear()
+                self.initial_signals.clear()
+                self.pool_validations.clear()
+                self.market_confirmations.clear()
 
                 await self.event_bus.stop()
                 logger.info("Cleanup completed")
