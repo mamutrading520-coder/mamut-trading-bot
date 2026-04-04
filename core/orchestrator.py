@@ -11,6 +11,7 @@ from config.settings import Settings
 from core.event_bus import Event, get_event_bus
 from core.token_lock_manager import TokenLockManager
 from core.signal_deduper import SignalDeduper
+from core.discovery_deduper import DiscoveryDeduper
 from core.state_manager import StateManager
 from storage.sqlite_store import SQLiteStore
 
@@ -27,6 +28,7 @@ class Orchestrator:
         self.store = SQLiteStore(settings)
         self.lock_manager = TokenLockManager()
         self.signal_deduper = SignalDeduper()
+        self.discovery_deduper = DiscoveryDeduper(settings)
         self.state_manager = StateManager(self.store)
 
         self.pump_listener = None
@@ -241,6 +243,23 @@ class Orchestrator:
                 return
 
             symbol = event.data.get("symbol", "UNKNOWN")
+            is_duplicate, duplicate_reason = self.discovery_deduper.check_and_register(event.data or {})
+            if is_duplicate:
+                logger.info(
+                    f"Discovery duplicate skipped: {symbol} ({mint[:8]}...) | reason={duplicate_reason}"
+                )
+                self._record_pipeline_metric(
+                    operation="token_discovered_deduped",
+                    mint=mint,
+                    success=True,
+                    metadata={
+                        "reason": duplicate_reason,
+                        "symbol": symbol,
+                        "creator": event.data.get("creator"),
+                    },
+                )
+                return
+
             if not self.lock_manager.lock_token(mint):
                 logger.debug(f"Token already being processed: {mint[:8]}...")
                 return
@@ -572,9 +591,14 @@ class Orchestrator:
         while self.running:
             try:
                 expired_count = self.lock_manager.cleanup_expired_locks()
-                self.signal_deduper.cleanup_old_signals()
+                dedup_cleanup = self.signal_deduper.cleanup_old_signals()
+                discovery_cleanup = self.discovery_deduper.cleanup_old_entries()
                 if expired_count:
                     logger.debug(f"Expired locks cleaned during maintenance: {expired_count}")
+                if dedup_cleanup or discovery_cleanup:
+                    logger.debug(
+                        f"Dedup cleanup | signals={dedup_cleanup} discoveries={discovery_cleanup}"
+                    )
                 await asyncio.sleep(5)
             except asyncio.CancelledError:
                 logger.info("Token processor cancelled")
@@ -590,6 +614,7 @@ class Orchestrator:
             "event_bus": self.event_bus.get_listener_count(),
             "lock_manager": self.lock_manager.get_stats(),
             "signal_deduper": self.signal_deduper.get_stats(),
+            "discovery_deduper": self.discovery_deduper.get_stats(),
             "storage": self.state_manager.get_stats(),
             "token_context_cache": len(self.token_context),
             "cached_initial_signals": len(self.initial_signals),
