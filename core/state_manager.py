@@ -37,6 +37,7 @@ class StateManager:
         "POOL_TIMEOUT",
         "ABANDONED",
         "FAILED",
+        "INTERRUPTED",
     }
 
     def __init__(self, store):
@@ -47,6 +48,7 @@ class StateManager:
         self.abandoned_tokens: int = 0
         self.failed_updates: int = 0
         self.failed_tokens: int = 0
+        self.interrupted_tokens: int = 0
         self.evicted_tokens: int = 0
 
     async def initialize_token(
@@ -241,6 +243,48 @@ class StateManager:
             self.failed_updates += 1
             return False
 
+    async def mark_interrupted(
+        self,
+        mint: str,
+        reason: str,
+        details: Optional[Dict[str, Any]] = None,
+        event: str = "ShutdownCleanup",
+    ) -> bool:
+        if not mint:
+            logger.error("mark_interrupted called without mint")
+            self.failed_updates += 1
+            return False
+
+        try:
+            self._record_lifecycle(
+                mint=mint,
+                new_status="INTERRUPTED",
+                event=event,
+                reason=reason,
+                details=details,
+            )
+
+            self.token_states[mint] = "INTERRUPTED"
+
+            try:
+                self.store.update_token(
+                    mint,
+                    {
+                        "lifecycle_status": "INTERRUPTED",
+                    },
+                )
+            except Exception as db_error:
+                logger.warning(f"Could not persist interrupted state for {mint[:8]}...: {db_error}")
+
+            self.interrupted_tokens += 1
+            logger.debug(f"Token {mint[:8]}... interrupted: {reason}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Error marking token interrupted {mint[:8]}...: {e}")
+            self.failed_updates += 1
+            return False
+
     async def mark_early_signal_sent(self, mint: str) -> bool:
         updated = await self.update_token_state(
             mint=mint,
@@ -275,6 +319,7 @@ class StateManager:
             "abandoned_tokens": self.abandoned_tokens,
             "failed_updates": self.failed_updates,
             "failed_tokens": self.failed_tokens,
+            "interrupted_tokens": self.interrupted_tokens,
             "evicted_tokens": self.evicted_tokens,
             "states": dict(self.token_states),
             "state_counts": state_counts,

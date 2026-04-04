@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, Set
 
 from monitoring.logger import setup_logger
 from config.settings import Settings
@@ -212,13 +212,82 @@ class Orchestrator:
         if cleared:
             logger.debug(f"Cleared runtime cache for {mint[:8]}...: {', '.join(cleared)}")
 
+    def _collect_runtime_mints(self) -> Set[str]:
+        runtime_mints: Set[str] = set(self.lock_manager.locks.keys())
+        runtime_mints.update(self.token_context.keys())
+        runtime_mints.update(self.initial_signals.keys())
+        runtime_mints.update(self.pool_validations.keys())
+        runtime_mints.update(self.market_confirmations.keys())
+        runtime_mints.update(self.state_manager.token_states.keys())
+        if self.raydium_listener:
+            runtime_mints.update(self.raydium_listener.monitored_tokens.keys())
+        return {mint for mint in runtime_mints if mint}
+
     async def _finalize_token_runtime(self, mint: str, stop_raydium: bool = False, keep_initial_signal: bool = False, release_reason: str = "terminal", evict_state: bool = False) -> None:
         if stop_raydium:
             await self._stop_raydium_watch(mint)
-        self.lock_manager.unlock_token(mint, reason=release_reason)
+        self.lock_manager.release_token(mint, reason=release_reason)
         self._clear_token_runtime(mint, keep_initial_signal=keep_initial_signal)
         if evict_state:
             self.state_manager.evict_token_state(mint)
+
+    async def _shutdown_finalize_runtime_tokens(self) -> int:
+        runtime_mints = sorted(self._collect_runtime_mints())
+        if not runtime_mints:
+            return 0
+
+        logger.info(f"Finalizing {len(runtime_mints)} in-flight runtime tokens before shutdown")
+        cleaned = 0
+        terminal_states = {"ABANDONED", "FAILED", "POOL_TIMEOUT", "POOL_INVALID", "INTERRUPTED"}
+
+        for mint in runtime_mints:
+            try:
+                current_state = self.state_manager.token_states.get(mint)
+                details = {
+                    "previous_state": current_state,
+                    "had_token_context": mint in self.token_context,
+                    "had_initial_signal": mint in self.initial_signals,
+                    "had_pool_validation": mint in self.pool_validations,
+                    "had_market_confirmation": mint in self.market_confirmations,
+                    "had_lock": mint in self.lock_manager.locks,
+                    "watched_by_raydium": bool(
+                        self.raydium_listener and mint in self.raydium_listener.monitored_tokens
+                    ),
+                }
+
+                if current_state not in terminal_states:
+                    await self.state_manager.mark_interrupted(
+                        mint=mint,
+                        reason="Application shutdown during in-flight processing",
+                        details=details,
+                    )
+
+                self._record_pipeline_metric(
+                    operation="shutdown_runtime_cleanup",
+                    mint=mint,
+                    success=True,
+                    metadata=details,
+                )
+
+                await self._finalize_token_runtime(
+                    mint=mint,
+                    stop_raydium=True,
+                    keep_initial_signal=False,
+                    release_reason="shutdown_cleanup",
+                    evict_state=True,
+                )
+                cleaned += 1
+            except Exception as e:
+                logger.error(f"Error cleaning runtime token {mint[:8]}... during shutdown: {e}")
+                self._record_pipeline_metric(
+                    operation="shutdown_runtime_cleanup",
+                    mint=mint,
+                    success=False,
+                    error_message=str(e),
+                    metadata={"stage": "shutdown_cleanup"},
+                )
+
+        return cleaned
 
     async def _handle_stage_failure(self, stage: str, mint: Optional[str], error: Exception, details: Optional[Dict[str, Any]] = None, stop_raydium: bool = False, keep_initial_signal: bool = False) -> None:
         error_message = str(error)
@@ -266,7 +335,7 @@ class Orchestrator:
 
             initialized = await self.state_manager.initialize_token(mint=mint, name=event.data.get("name"), symbol=symbol)
             if not initialized:
-                self.lock_manager.unlock_token(mint, reason="initialize_failed")
+                self.lock_manager.release_token(mint, reason="initialize_failed")
                 return
 
             self.tokens_processed += 1
@@ -371,7 +440,7 @@ class Orchestrator:
                 await self._start_raydium_watch(mint)
             elif decision == "MONITOR":
                 await self._start_raydium_watch(mint)
-            elif decision in {"REJECT", "IGNORE", "NO_SIGNAL"}:
+            elif decision in {"REJECT", "IGNORE", "NO_SIGNAL", "WARN"}:
                 await self._finalize_token_runtime(mint=mint, stop_raydium=False, release_reason=f"decision:{decision.lower()}", evict_state=True)
         except Exception as e:
             await self._handle_stage_failure("DecisionMade", mint, e, details=event.data, stop_raydium=False, keep_initial_signal=True)
@@ -487,7 +556,7 @@ class Orchestrator:
             if self.signal_engine and not self._shutting_down:
                 await self.signal_engine.generate_confirmed_and_emit(event=event, token_context=self.token_context.get(mint, {}))
             await self._stop_raydium_watch(mint)
-            self.lock_manager.unlock_token(mint, reason="market_confirmed")
+            self.lock_manager.release_token(mint, reason="market_confirmed")
         except Exception as e:
             await self._handle_stage_failure("MarketConfirmed", mint, e, details=event.data, stop_raydium=True)
 
@@ -632,6 +701,7 @@ class Orchestrator:
                 self.running = False
                 await self._stop_runtime_components()
                 await self._cancel_background_tasks()
+                await self._shutdown_finalize_runtime_tokens()
                 if self.token_enricher:
                     await self.token_enricher.close()
                 if self.raydium_listener:
