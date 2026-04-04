@@ -79,6 +79,11 @@ class PumpEventParser:
         re.IGNORECASE,
     )
     _VALID_SYMBOL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_$.-]{0,19}$")
+    _WORD_TOKEN_RE = re.compile(r"[A-Za-zÀ-ÿ0-9']+")
+    _NAME_CONNECTOR_WORDS = {
+        "a", "an", "and", "or", "the", "of", "to", "for", "in", "on", "with", "from",
+        "y", "de", "la", "el", "los", "las", "para", "con", "por",
+    }
 
     def parse(self, data: Dict[str, Any]) -> Optional[ParsedTokenEvent]:
         """Parse token creation event"""
@@ -180,6 +185,9 @@ class PumpEventParser:
         if self._looks_like_prompt_text(value):
             return False
 
+        if self._looks_like_semantic_name_garbage(value):
+            return False
+
         non_alnum_ratio = sum(1 for ch in value if not ch.isalnum() and ch != " ") / max(len(value), 1)
         if len(value) >= 8 and non_alnum_ratio > 0.35:
             return False
@@ -244,6 +252,33 @@ class PumpEventParser:
             return True
 
         if any(pronoun in lowered for pronoun in [" her ", " him ", " them ", " it "]) and self._IMPERATIVE_PROMPT_RE.match(normalized):
+            return True
+
+        return False
+
+    def _looks_like_semantic_name_garbage(self, value: str) -> bool:
+        tokens = self._WORD_TOKEN_RE.findall(value)
+        if len(tokens) < 5:
+            return False
+
+        lowered_tokens = [token.lower() for token in tokens]
+        alpha_tokens = [token for token in tokens if any(ch.isalpha() for ch in token)]
+        if not alpha_tokens:
+            return False
+
+        digit_token_count = sum(1 for token in tokens if any(ch.isdigit() for ch in token))
+        connector_count = sum(1 for token in lowered_tokens if token in self._NAME_CONNECTOR_WORDS)
+        short_token_count = sum(1 for token in lowered_tokens if len(token) <= 2)
+        lowercase_alpha_count = sum(1 for token in alpha_tokens if token == token.lower())
+        lowercase_alpha_ratio = lowercase_alpha_count / max(len(alpha_tokens), 1)
+
+        if digit_token_count >= 1 and connector_count >= 1 and lowercase_alpha_ratio >= 0.80:
+            return True
+
+        if digit_token_count >= 1 and connector_count >= 1 and short_token_count >= 2:
+            return True
+
+        if connector_count >= 2 and short_token_count >= 2 and lowercase_alpha_ratio >= 0.90:
             return True
 
         return False
