@@ -30,7 +30,6 @@ class ParsedTokenEvent:
     creator_resolved: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary"""
         return {
             "mint": self.mint,
             "name": self.name,
@@ -78,10 +77,33 @@ class PumpEventParser:
         r"\b(?:in the style of|prompt:|cinematic|8k|ultra detailed|hyperrealistic)\b",
         re.IGNORECASE,
     )
+    _PROMOTIONAL_PHRASE_RE = re.compile(
+        r"\b(?:same\s+dev(?:eloper)?\s+as|same\s+team\s+as|same\s+guy\s+as|same\s+cto\s+as|btw\s+check|check\s+(?:this|it|ca)|official\s+ca|contract\s+below)\b",
+        re.IGNORECASE,
+    )
+    _CATCHPHRASE_PREFIX_RE = re.compile(
+        r"^\s*(?:just\s+buy|this\s+will|proof\s+that|hear\s+me\s+out)\b",
+        re.IGNORECASE,
+    )
+    _MATH_STATEMENT_RE = re.compile(
+        r"^\s*\d+(?:\s*[+\-*/xX]\s*\d+)+(?:\s*=\s*\d+)?\s*$",
+        re.IGNORECASE,
+    )
+    _OFFICIAL_NAME_RE = re.compile(r"^\s*official\b", re.IGNORECASE)
+    _HYPE_REPEAT_CHAR_RE = re.compile(r"([A-Za-z])\1{3,}")
+    _HYPE_NOISE_SUFFIX_RE = re.compile(r"[!@#$%^&*]{1,}$")
     _VALID_SYMBOL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_$.-]{0,19}$")
+    _WORD_TOKEN_RE = re.compile(r"[A-Za-zÀ-ÿ0-9']+")
+    _NAME_CONNECTOR_WORDS = {
+        "a", "an", "and", "or", "the", "of", "to", "for", "in", "on", "with", "from",
+        "y", "de", "la", "el", "los", "las", "para", "con", "por",
+    }
+    _PROMOTIONAL_NAME_WORDS = {
+        "same", "dev", "developer", "team", "cto", "check", "btw", "official",
+        "contract", "ca", "join", "follow", "alpha", "call", "entry", "send",
+    }
 
     def parse(self, data: Dict[str, Any]) -> Optional[ParsedTokenEvent]:
-        """Parse token creation event"""
         try:
             mint = data.get("mint")
             signature = data.get("signature")
@@ -161,89 +183,159 @@ class PumpEventParser:
     def _is_valid_name(self, value: str) -> bool:
         if not self._passes_length(value, kind="name"):
             return False
-
         if self._URL_LIKE_RE.search(value):
             return False
-
         if self._MENTION_RE.search(value):
             return False
-
         if self._COMMAND_PREFIX_RE.match(value):
             return False
-
         if self._COMMAND_WITH_AMOUNT_RE.match(value):
             return False
-
         if self._PAIR_OR_ACTION_RE.search(value) and ("/" in value or any(ch.isdigit() for ch in value)):
             return False
-
         if self._looks_like_prompt_text(value):
+            return False
+        if self._looks_like_semantic_name_garbage(value):
+            return False
+        if self._looks_like_promotional_name_garbage(value):
+            return False
+        if self._looks_like_catchphrase_name_garbage(value):
+            return False
+        if self._looks_like_official_or_hype_name_garbage(value):
             return False
 
         non_alnum_ratio = sum(1 for ch in value if not ch.isalnum() and ch != " ") / max(len(value), 1)
         if len(value) >= 8 and non_alnum_ratio > 0.35:
             return False
-
         return True
 
     def _is_valid_symbol(self, value: str) -> bool:
         if not self._passes_length(value, kind="symbol"):
             return False
-
         if " " in value:
             return False
-
         if value.startswith("@"):
             return False
-
         if self._URL_LIKE_RE.search(value):
             return False
-
         if self._MENTION_RE.search(value):
             return False
-
         if self._COMMAND_PREFIX_RE.match(value):
             return False
-
         if not self._VALID_SYMBOL_RE.fullmatch(value):
             return False
-
         return True
 
     def _passes_length(self, value: str, kind: str) -> bool:
         if not value or not value.strip():
             logger.debug(f"Invalid {kind}: empty")
             return False
-
         min_len = TOKEN_METADATA_THRESHOLDS.get(f"min_{kind}_length", 1)
         max_len = TOKEN_METADATA_THRESHOLDS.get(f"max_{kind}_length", 100)
         if len(value) < min_len or len(value) > max_len:
             logger.debug(f"Invalid {kind}: length out of range ({len(value)})")
             return False
-
         return True
 
     def _looks_like_prompt_text(self, value: str) -> bool:
         normalized = value.strip()
         lowered = normalized.lower()
         words = [word for word in normalized.split(" ") if word]
-
         if self._AI_PROMPT_RE.search(normalized):
             return True
-
         if self._STYLE_PROMPT_RE.search(normalized) and len(words) >= 3:
             return True
-
         if self._IMPERATIVE_PROMPT_RE.match(normalized) and len(words) >= 3:
             return True
-
         if lowered.startswith(("put ", "make ", "create ", "generate ", "draw ", "render ", "turn ")) and len(words) >= 3:
             return True
-
         if "grok imagine" in lowered or "chatgpt prompt" in lowered or "midjourney prompt" in lowered:
             return True
-
         if any(pronoun in lowered for pronoun in [" her ", " him ", " them ", " it "]) and self._IMPERATIVE_PROMPT_RE.match(normalized):
+            return True
+        return False
+
+    def _looks_like_semantic_name_garbage(self, value: str) -> bool:
+        tokens = self._WORD_TOKEN_RE.findall(value)
+        if len(tokens) < 5:
+            return False
+        lowered_tokens = [token.lower() for token in tokens]
+        alpha_tokens = [token for token in tokens if any(ch.isalpha() for ch in token)]
+        if not alpha_tokens:
+            return False
+        digit_token_count = sum(1 for token in tokens if any(ch.isdigit() for ch in token))
+        connector_count = sum(1 for token in lowered_tokens if token in self._NAME_CONNECTOR_WORDS)
+        short_token_count = sum(1 for token in lowered_tokens if len(token) <= 2)
+        lowercase_alpha_count = sum(1 for token in alpha_tokens if token == token.lower())
+        lowercase_alpha_ratio = lowercase_alpha_count / max(len(alpha_tokens), 1)
+        if digit_token_count >= 1 and connector_count >= 1 and lowercase_alpha_ratio >= 0.80:
+            return True
+        if digit_token_count >= 1 and connector_count >= 1 and short_token_count >= 2:
+            return True
+        if connector_count >= 2 and short_token_count >= 2 and lowercase_alpha_ratio >= 0.90:
+            return True
+        return False
+
+    def _looks_like_promotional_name_garbage(self, value: str) -> bool:
+        normalized = value.strip()
+        lowered = normalized.lower()
+        tokens = self._WORD_TOKEN_RE.findall(normalized)
+        if len(tokens) < 4:
+            return False
+        lowered_tokens = [token.lower() for token in tokens]
+        alpha_tokens = [token for token in tokens if any(ch.isalpha() for ch in token)]
+        lowercase_alpha_count = sum(1 for token in alpha_tokens if token == token.lower())
+        lowercase_alpha_ratio = lowercase_alpha_count / max(len(alpha_tokens), 1)
+        promo_count = sum(1 for token in lowered_tokens if token in self._PROMOTIONAL_NAME_WORDS)
+        if self._PROMOTIONAL_PHRASE_RE.search(normalized):
+            return True
+        if promo_count >= 2 and len(tokens) >= 5 and lowercase_alpha_ratio >= 0.80:
+            return True
+        if ("btw" in lowered_tokens or "check" in lowered_tokens) and len(tokens) >= 4 and lowercase_alpha_ratio >= 0.75:
+            return True
+        if lowered.startswith("same dev as ") or lowered.startswith("same developer as "):
+            return True
+        return False
+
+    def _looks_like_catchphrase_name_garbage(self, value: str) -> bool:
+        normalized = value.strip()
+        lowered = normalized.lower()
+        tokens = self._WORD_TOKEN_RE.findall(normalized)
+        if self._MATH_STATEMENT_RE.fullmatch(normalized):
+            return True
+        if len(tokens) < 2:
+            return False
+        if self._CATCHPHRASE_PREFIX_RE.match(normalized):
+            return True
+        if lowered.startswith("just buy "):
+            return True
+        if lowered.startswith("this will "):
+            return True
+        if lowered.startswith("proof that "):
+            return True
+        if lowered.startswith("hear me out"):
+            return True
+        return False
+
+    def _looks_like_official_or_hype_name_garbage(self, value: str) -> bool:
+        normalized = value.strip()
+        lowered = normalized.lower()
+        tokens = self._WORD_TOKEN_RE.findall(normalized)
+
+        if self._OFFICIAL_NAME_RE.match(normalized) and len(tokens) >= 2:
+            return True
+
+        if len(tokens) == 1:
+            token = tokens[0]
+            if len(token) >= 12 and self._HYPE_REPEAT_CHAR_RE.search(token):
+                return True
+            if len(normalized) >= 12 and self._HYPE_NOISE_SUFFIX_RE.search(normalized) and self._HYPE_REPEAT_CHAR_RE.search(normalized):
+                return True
+            uppercase_ratio = sum(1 for ch in token if ch.isupper()) / max(sum(1 for ch in token if ch.isalpha()), 1)
+            if len(token) >= 14 and uppercase_ratio >= 0.8 and self._HYPE_NOISE_SUFFIX_RE.search(normalized):
+                return True
+
+        if "official" in lowered and any(keyword in lowered for keyword in [" coin", " token", " ca", " cto"]):
             return True
 
         return False
