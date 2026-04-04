@@ -68,6 +68,19 @@ class TrashFilterEngine:
         except (TypeError, ValueError):
             return default
 
+    def _creator_history_thresholds(self) -> Dict[str, int]:
+        return {
+            "min_outcome_history": int(
+                CREATOR_RISK_THRESHOLDS.get("min_outcome_history_for_failure_penalty", 3)
+            ),
+            "hard_reject_min_tokens": int(
+                CREATOR_RISK_THRESHOLDS.get("hard_reject_min_tokens", 8)
+            ),
+            "hard_reject_min_outcomes": int(
+                CREATOR_RISK_THRESHOLDS.get("hard_reject_min_outcomes", 4)
+            ),
+        }
+
     def _calculate_authority_risk(self, token_data: Dict[str, Any]) -> Dict[str, Any]:
         """Calculate authority/permission risk score."""
         try:
@@ -117,20 +130,26 @@ class TrashFilterEngine:
             }
 
     def _calculate_creator_risk(self, token_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Calculate creator reputation risk score."""
+        """Calculate creator reputation risk with evidence-aware hard rejection gates."""
         creator = token_data.get("creator")
         creator_resolved = token_data.get("creator_resolved", True)
+        thresholds = self._creator_history_thresholds()
 
         if not creator_resolved or not creator or (isinstance(creator, str) and creator.upper() == "UNKNOWN"):
             return {
-                "score": 50.0,
+                "score": 42.0,
                 "creator": creator or "unknown",
                 "is_new": False,
                 "is_blacklisted": False,
                 "is_trusted": False,
                 "total_tokens": 0,
                 "successful_tokens": 0,
+                "failed_tokens": 0,
+                "resolved_outcomes": 0,
                 "wallet_age_days": None,
+                "success_rate": 0.0,
+                "failure_rate": 0.0,
+                "hard_reject_eligible": False,
                 "reasons": ["Creator no resuelto"],
                 "warnings": ["Creator identity unavailable"],
             }
@@ -138,51 +157,108 @@ class TrashFilterEngine:
         try:
             creator_profile = self.store.get_creator_profile(creator)
 
-            risk_score = 55.0
-            reasons: List[str] = []
-            warnings: List[str] = []
-
             total_tokens = 0
             successful_tokens = 0
+            failed_tokens = 0
+            resolved_outcomes = 0
             wallet_age_days = None
             is_blacklisted = False
             is_trusted = False
+            success_rate = 0.0
+            failure_rate = 0.0
+
+            reasons: List[str] = []
+            warnings: List[str] = []
+            hard_reject_eligible = False
 
             if creator_profile:
                 total_tokens = int(getattr(creator_profile, "total_tokens", 0) or 0)
                 successful_tokens = int(getattr(creator_profile, "successful_tokens", 0) or 0)
+                failed_tokens = int(getattr(creator_profile, "failed_tokens", 0) or 0)
                 wallet_age_days = getattr(creator_profile, "wallet_age_days", None)
                 is_blacklisted = bool(getattr(creator_profile, "is_blacklisted", False))
                 is_trusted = bool(getattr(creator_profile, "is_trusted", False))
+                resolved_outcomes = max(0, successful_tokens + failed_tokens)
+
+                if resolved_outcomes > 0:
+                    success_rate = successful_tokens / resolved_outcomes
+                    failure_rate = failed_tokens / resolved_outcomes
 
                 if is_blacklisted:
-                    risk_score = 95.0
-                    reasons.append("Creator blacklisted")
-                elif is_trusted:
-                    risk_score = 15.0
+                    return {
+                        "score": 95.0,
+                        "creator": creator,
+                        "is_new": False,
+                        "is_blacklisted": True,
+                        "is_trusted": False,
+                        "total_tokens": total_tokens,
+                        "successful_tokens": successful_tokens,
+                        "failed_tokens": failed_tokens,
+                        "resolved_outcomes": resolved_outcomes,
+                        "wallet_age_days": wallet_age_days,
+                        "success_rate": success_rate,
+                        "failure_rate": failure_rate,
+                        "hard_reject_eligible": True,
+                        "reasons": ["Creator blacklisted"],
+                        "warnings": [],
+                    }
+
+                if is_trusted:
+                    risk_score = 10.0
                     warnings.append("Creator trusted")
                 else:
-                    if total_tokens > 0:
-                        success_rate = successful_tokens / total_tokens
-                        risk_score = 55.0 - (success_rate * 35.0)
+                    risk_score = 32.0
 
-                        if total_tokens >= 5 and success_rate < 0.10:
-                            reasons.append("Creator con historial muy débil")
-                            risk_score += 20.0
-                        elif total_tokens >= 3 and success_rate < 0.25:
-                            warnings.append("Creator con baja tasa de éxito")
-                            risk_score += 10.0
+                    if total_tokens >= 5 and resolved_outcomes == 0:
+                        warnings.append("Creator aún no tiene outcomes resueltos")
+                        risk_score += 6.0
 
                     if wallet_age_days is not None:
-                        if wallet_age_days < 7:
+                        if wallet_age_days < 1:
                             warnings.append("Creator wallet muy nueva")
-                            risk_score += 15.0
-                        elif wallet_age_days < 30:
+                            risk_score += 12.0
+                        elif wallet_age_days < 7:
                             warnings.append("Creator wallet reciente")
                             risk_score += 8.0
+                        elif wallet_age_days < 30:
+                            warnings.append("Creator wallet joven")
+                            risk_score += 3.0
+
+                    if resolved_outcomes >= thresholds["min_outcome_history"]:
+                        if resolved_outcomes >= 6 and failure_rate >= 0.85:
+                            reasons.append("Creator con historial confirmado muy negativo")
+                            risk_score += 28.0
+                        elif resolved_outcomes >= 4 and failure_rate >= 0.70:
+                            reasons.append("Creator con historial confirmado débil")
+                            risk_score += 18.0
+                        elif failure_rate >= 0.50:
+                            warnings.append("Creator con tasa elevada de fallos")
+                            risk_score += 8.0
+
+                        if success_rate >= 0.60:
+                            warnings.append("Creator con buen historial confirmado")
+                            risk_score -= 10.0
+                        elif success_rate >= 0.40:
+                            warnings.append("Creator con historial confirmado aceptable")
+                            risk_score -= 5.0
+                    else:
+                        warnings.append("Historial confirmado insuficiente para castigo duro")
+
+                    if (
+                        total_tokens >= thresholds["hard_reject_min_tokens"]
+                        and wallet_age_days is not None
+                        and wallet_age_days < 7
+                    ):
+                        warnings.append("Alta velocidad de lanzamientos en poco tiempo")
+                        risk_score += 6.0
+
+                hard_reject_eligible = is_blacklisted or (
+                    total_tokens >= thresholds["hard_reject_min_tokens"]
+                    and resolved_outcomes >= thresholds["hard_reject_min_outcomes"]
+                )
             else:
                 warnings.append("Creator sin historial conocido")
-                risk_score = 45.0
+                risk_score = 38.0
 
             risk_score = max(0.0, min(100.0, risk_score))
 
@@ -194,7 +270,12 @@ class TrashFilterEngine:
                 "is_trusted": is_trusted,
                 "total_tokens": total_tokens,
                 "successful_tokens": successful_tokens,
+                "failed_tokens": failed_tokens,
+                "resolved_outcomes": resolved_outcomes,
                 "wallet_age_days": wallet_age_days,
+                "success_rate": success_rate,
+                "failure_rate": failure_rate,
+                "hard_reject_eligible": hard_reject_eligible,
                 "reasons": reasons,
                 "warnings": warnings,
             }
@@ -209,7 +290,12 @@ class TrashFilterEngine:
                 "is_trusted": False,
                 "total_tokens": 0,
                 "successful_tokens": 0,
+                "failed_tokens": 0,
+                "resolved_outcomes": 0,
                 "wallet_age_days": None,
+                "success_rate": 0.0,
+                "failure_rate": 0.0,
+                "hard_reject_eligible": False,
                 "reasons": [f"Creator risk error: {e}"],
                 "warnings": [],
             }
@@ -229,8 +315,6 @@ class TrashFilterEngine:
             reasons: List[str] = []
             warnings: List[str] = []
 
-            # Prefer on-chain creator_hold_percentage when available; fall back to
-            # the legacy creator_balance / total_supply calculation.
             if creator_hold_percentage > 0:
                 creator_percentage = creator_hold_percentage
                 has_supply_info = True
@@ -253,7 +337,6 @@ class TrashFilterEngine:
             elif has_supply_info and creator_percentage < 20:
                 risk_score = 25.0
 
-            # Top-holder whale risk (independent of creator concentration)
             if top_holder_percentage >= 35:
                 risk_score += 15.0
                 warnings.append(f"Top holder controla {top_holder_percentage:.1f}% del supply")
@@ -261,7 +344,6 @@ class TrashFilterEngine:
                 risk_score += 8.0
                 warnings.append(f"Top holder concentrado ({top_holder_percentage:.1f}%)")
 
-            # Top-5 holder cluster risk
             if top_5_holders_percentage >= 70:
                 risk_score += 12.0
                 warnings.append(f"Top-5 holders controlan {top_5_holders_percentage:.1f}%")
@@ -317,21 +399,15 @@ class TrashFilterEngine:
             reasons: List[str] = []
             warnings: List[str] = []
 
-            # Caso 1: metadata aún no disponible o claramente incompleta.
-            # En etapa temprana esto NO debe equivaler a scam.
             if metadata_score_raw is None:
                 risk_score = 35.0
                 warnings.append("Metadata score no disponible aún")
             else:
                 metadata_score = float(metadata_score_raw or 0.0)
-
-                # Si score=0 pero ni siquiera se ha recuperado metadata real,
-                # tratamos esto como información insuficiente, no como basura confirmada.
                 if metadata_score <= 0 and not metadata_retrieved and not metadata_json:
                     risk_score = 35.0
                     warnings.append("Metadata aún no enriquecida")
                 else:
-                    # Escala menos agresiva que 100 - score
                     risk_score = max(5.0, min(85.0, 70.0 - (metadata_score * 0.6)))
 
                     if metadata_score < 20:
@@ -376,7 +452,7 @@ class TrashFilterEngine:
                 "metadata_retrieved": False,
                 "metadata_present": False,
             }
-    
+
     def _build_honeypot_input(
         self,
         token_data: Dict[str, Any],
@@ -413,7 +489,6 @@ class TrashFilterEngine:
             holder_concentration = token_data.get("holder_concentration_score")
         holder_concentration = self._safe_float(holder_concentration, 0.0)
 
-        # Convert 0..100 concentration scores to ratio scale expected by HoneypotDetector.
         if holder_concentration > 1.0:
             holder_concentration = holder_concentration / 100.0
 
@@ -426,7 +501,6 @@ class TrashFilterEngine:
             "creator_success_rate": self._safe_float(creator_success_rate, 0.0),
             "top_holder_ratio": max(0.0, min(1.0, top_holder_percentage / 100.0)),
             "holder_concentration": max(0.0, min(1.0, holder_concentration)),
-            # Normalize wallet cluster score (0-100) to 0-1 scale for HoneypotDetector.
             "wallet_cluster_score": self._safe_float(
                 wallet_cluster_risk.get("wallet_cluster_risk_score", wallet_cluster_risk.get("score", 0.0)),
                 0.0,
@@ -503,7 +577,10 @@ class TrashFilterEngine:
         if authority_risk["score"] > AUTHORITY_RISK_THRESHOLDS.get("max_authority_risk", 80):
             rejection_reasons.append("Exceeds authority risk threshold")
 
-        if creator_risk["score"] > CREATOR_RISK_THRESHOLDS.get("max_creator_risk", 85):
+        if (
+            creator_risk["score"] > CREATOR_RISK_THRESHOLDS.get("max_creator_risk", 85)
+            and creator_risk.get("hard_reject_eligible", False)
+        ):
             rejection_reasons.append("Exceeds creator risk threshold")
 
         if concentration_risk["score"] > CONCENTRATION_THRESHOLDS.get("max_concentration_risk", 80):
@@ -531,9 +608,7 @@ class TrashFilterEngine:
         return len(rejection_reasons) > 0, rejection_reasons
 
     async def filter_and_emit(self, event: Event) -> Optional[str]:
-        """
-        Filter token and emit TokenPassed or TokenRejected.
-        """
+        """Filter token and emit TokenPassed or TokenRejected."""
         try:
             token_data = event.data or {}
             mint = token_data.get("mint")

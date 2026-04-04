@@ -143,6 +143,57 @@ class Orchestrator:
             metadata=metadata or {},
         )
 
+    def _get_creator_identity(self, mint: str, event_data: Optional[Dict[str, Any]] = None) -> Optional[str]:
+        creator = None
+        if event_data:
+            creator = event_data.get("creator")
+        if not creator:
+            creator = self.token_context.get(mint, {}).get("creator")
+        if not creator or not isinstance(creator, str):
+            return None
+        normalized = creator.strip()
+        if normalized.lower() in {"", "unknown"}:
+            return None
+        return normalized
+
+    def _record_creator_outcome(self, mint: str, outcome: str, score: Optional[float] = None, event_data: Optional[Dict[str, Any]] = None) -> None:
+        creator = self._get_creator_identity(mint, event_data)
+        if not creator:
+            return
+
+        try:
+            profile = self.store.get_creator_profile(creator)
+            current_success = int(getattr(profile, "successful_tokens", 0) or 0) if profile else 0
+            current_failed = int(getattr(profile, "failed_tokens", 0) or 0) if profile else 0
+            current_total = int(getattr(profile, "total_tokens", 0) or 0) if profile else 0
+            current_avg = float(getattr(profile, "average_score", 0.0) or 0.0) if profile else 0.0
+
+            updates: Dict[str, Any] = {
+                "last_token_date": datetime.utcnow(),
+                "total_tokens": max(current_total, current_success + current_failed),
+            }
+
+            if profile is None:
+                updates["first_token_date"] = datetime.utcnow()
+                updates["total_tokens"] = max(1, updates["total_tokens"])
+
+            if outcome == "success":
+                new_success = current_success + 1
+                updates["successful_tokens"] = new_success
+                if score is not None:
+                    updates["average_score"] = round(
+                        ((current_avg * current_success) + float(score)) / new_success,
+                        2,
+                    )
+            elif outcome == "failed":
+                updates["failed_tokens"] = current_failed + 1
+            else:
+                return
+
+            self.store.update_creator_profile(creator, updates)
+        except Exception as e:
+            logger.error(f"Error recording creator outcome for {mint[:8]}...: {e}")
+
     def _should_accept_new_work(self) -> bool:
         return self.running and not self._shutting_down and not self._cleanup_done
 
@@ -264,6 +315,7 @@ class Orchestrator:
             reason = event.data.get("reason", "Unknown")
             self._merge_token_context(mint, event.data)
             self._safe_store_call(f"filter-reject persistence for {mint[:8]}...", self.store.update_token_filter_result, mint, {**event.data, "passed_filters": False})
+            self._record_creator_outcome(mint=mint, outcome="failed", event_data=event.data)
             await self.state_manager.mark_abandoned(mint, reason)
             self._record_pipeline_metric(operation="token_rejected", mint=mint, success=True, metadata={"reason": reason})
             await self._finalize_token_runtime(mint=mint, stop_raydium=True, release_reason="rejected", evict_state=True)
@@ -341,6 +393,12 @@ class Orchestrator:
             await self.state_manager.update_token_state(mint=mint, state="ALERT_DISPATCHED", event="AlertDispatched", details=event.data)
             if signal_type == "EARLY":
                 await self.state_manager.mark_early_signal_sent(mint)
+                self._record_creator_outcome(
+                    mint=mint,
+                    outcome="success",
+                    score=event.data.get("score"),
+                    event_data=event.data,
+                )
             elif signal_type == "CONFIRMED":
                 await self._finalize_token_runtime(mint=mint, stop_raydium=False, release_reason="confirmed_dispatched", evict_state=True)
         except Exception as e:
