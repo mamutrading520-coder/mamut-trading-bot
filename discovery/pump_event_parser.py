@@ -78,7 +78,28 @@ class PumpEventParser:
         r"\b(?:in the style of|prompt:|cinematic|8k|ultra detailed|hyperrealistic)\b",
         re.IGNORECASE,
     )
+    _PROMOTIONAL_PHRASE_RE = re.compile(
+        r"\b(?:same\s+dev(?:eloper)?\s+as|same\s+team\s+as|same\s+guy\s+as|same\s+cto\s+as|btw\s+check|check\s+(?:this|it|ca)|official\s+ca|contract\s+below)\b",
+        re.IGNORECASE,
+    )
+    _CATCHPHRASE_PREFIX_RE = re.compile(
+        r"^\s*(?:just\s+buy|this\s+will|proof\s+that|hear\s+me\s+out)\b",
+        re.IGNORECASE,
+    )
+    _MATH_STATEMENT_RE = re.compile(
+        r"^\s*\d+(?:\s*[+\-*/xX]\s*\d+)+(?:\s*=\s*\d+)?\s*$",
+        re.IGNORECASE,
+    )
     _VALID_SYMBOL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_$.-]{0,19}$")
+    _WORD_TOKEN_RE = re.compile(r"[A-Za-zÀ-ÿ0-9']+")
+    _NAME_CONNECTOR_WORDS = {
+        "a", "an", "and", "or", "the", "of", "to", "for", "in", "on", "with", "from",
+        "y", "de", "la", "el", "los", "las", "para", "con", "por",
+    }
+    _PROMOTIONAL_NAME_WORDS = {
+        "same", "dev", "developer", "team", "cto", "check", "btw", "official",
+        "contract", "ca", "join", "follow", "alpha", "call", "entry", "send",
+    }
 
     def parse(self, data: Dict[str, Any]) -> Optional[ParsedTokenEvent]:
         """Parse token creation event"""
@@ -180,6 +201,15 @@ class PumpEventParser:
         if self._looks_like_prompt_text(value):
             return False
 
+        if self._looks_like_semantic_name_garbage(value):
+            return False
+
+        if self._looks_like_promotional_name_garbage(value):
+            return False
+
+        if self._looks_like_catchphrase_name_garbage(value):
+            return False
+
         non_alnum_ratio = sum(1 for ch in value if not ch.isalnum() and ch != " ") / max(len(value), 1)
         if len(value) >= 8 and non_alnum_ratio > 0.35:
             return False
@@ -244,6 +274,88 @@ class PumpEventParser:
             return True
 
         if any(pronoun in lowered for pronoun in [" her ", " him ", " them ", " it "]) and self._IMPERATIVE_PROMPT_RE.match(normalized):
+            return True
+
+        return False
+
+    def _looks_like_semantic_name_garbage(self, value: str) -> bool:
+        tokens = self._WORD_TOKEN_RE.findall(value)
+        if len(tokens) < 5:
+            return False
+
+        lowered_tokens = [token.lower() for token in tokens]
+        alpha_tokens = [token for token in tokens if any(ch.isalpha() for ch in token)]
+        if not alpha_tokens:
+            return False
+
+        digit_token_count = sum(1 for token in tokens if any(ch.isdigit() for ch in token))
+        connector_count = sum(1 for token in lowered_tokens if token in self._NAME_CONNECTOR_WORDS)
+        short_token_count = sum(1 for token in lowered_tokens if len(token) <= 2)
+        lowercase_alpha_count = sum(1 for token in alpha_tokens if token == token.lower())
+        lowercase_alpha_ratio = lowercase_alpha_count / max(len(alpha_tokens), 1)
+
+        if digit_token_count >= 1 and connector_count >= 1 and lowercase_alpha_ratio >= 0.80:
+            return True
+
+        if digit_token_count >= 1 and connector_count >= 1 and short_token_count >= 2:
+            return True
+
+        if connector_count >= 2 and short_token_count >= 2 and lowercase_alpha_ratio >= 0.90:
+            return True
+
+        return False
+
+    def _looks_like_promotional_name_garbage(self, value: str) -> bool:
+        normalized = value.strip()
+        lowered = normalized.lower()
+        tokens = self._WORD_TOKEN_RE.findall(normalized)
+        if len(tokens) < 4:
+            return False
+
+        lowered_tokens = [token.lower() for token in tokens]
+        alpha_tokens = [token for token in tokens if any(ch.isalpha() for ch in token)]
+        lowercase_alpha_count = sum(1 for token in alpha_tokens if token == token.lower())
+        lowercase_alpha_ratio = lowercase_alpha_count / max(len(alpha_tokens), 1)
+        promo_count = sum(1 for token in lowered_tokens if token in self._PROMOTIONAL_NAME_WORDS)
+
+        if self._PROMOTIONAL_PHRASE_RE.search(normalized):
+            return True
+
+        if promo_count >= 2 and len(tokens) >= 5 and lowercase_alpha_ratio >= 0.80:
+            return True
+
+        if ("btw" in lowered_tokens or "check" in lowered_tokens) and len(tokens) >= 4 and lowercase_alpha_ratio >= 0.75:
+            return True
+
+        if lowered.startswith("same dev as ") or lowered.startswith("same developer as "):
+            return True
+
+        return False
+
+    def _looks_like_catchphrase_name_garbage(self, value: str) -> bool:
+        normalized = value.strip()
+        lowered = normalized.lower()
+        tokens = self._WORD_TOKEN_RE.findall(normalized)
+
+        if self._MATH_STATEMENT_RE.fullmatch(normalized):
+            return True
+
+        if len(tokens) < 2:
+            return False
+
+        if self._CATCHPHRASE_PREFIX_RE.match(normalized):
+            return True
+
+        if lowered.startswith("just buy "):
+            return True
+
+        if lowered.startswith("this will "):
+            return True
+
+        if lowered.startswith("proof that "):
+            return True
+
+        if lowered.startswith("hear me out"):
             return True
 
         return False
