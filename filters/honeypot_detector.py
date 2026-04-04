@@ -23,6 +23,59 @@ class HoneypotDetector:
         self.analyzed_count = 0
         self.suspicious_count = 0
 
+    @staticmethod
+    def _safe_float(value: Any, default: float = 0.0) -> float:
+        try:
+            if value is None:
+                return default
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _safe_int(value: Any, default: int = 0) -> int:
+        try:
+            if value is None:
+                return default
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _extract_creator_metrics(self, token_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Extract creator-history metrics from both flat payloads and nested analysis."""
+        analysis = token_data.get("analysis", {}) or {}
+
+        creator_tokens_created = self._safe_int(
+            token_data.get("creator_tokens_created", analysis.get("total_tokens")),
+            0,
+        )
+        creator_failed_tokens = self._safe_int(
+            token_data.get("creator_failed_tokens", analysis.get("failed_tokens")),
+            0,
+        )
+        creator_successful_tokens = self._safe_int(
+            token_data.get("creator_successful_tokens", analysis.get("successful_tokens")),
+            0,
+        )
+
+        creator_failure_rate = token_data.get("creator_failure_rate")
+        if creator_failure_rate is None:
+            creator_failure_rate = analysis.get("failure_rate")
+        if creator_failure_rate is None and creator_tokens_created > 0:
+            creator_failure_rate = creator_failed_tokens / creator_tokens_created
+
+        creator_success_rate = token_data.get("creator_success_rate")
+        if creator_success_rate is None:
+            creator_success_rate = analysis.get("success_rate")
+        if creator_success_rate is None and creator_tokens_created > 0:
+            creator_success_rate = creator_successful_tokens / creator_tokens_created
+
+        return {
+            "creator_tokens_created": creator_tokens_created,
+            "creator_failure_rate": self._safe_float(creator_failure_rate, 0.0),
+            "creator_success_rate": self._safe_float(creator_success_rate, 0.0),
+        }
+
     async def analyze(self, token_data: Dict[str, Any]) -> Dict[str, Any]:
         """
         Analyze token for suspicious / honeypot-like characteristics.
@@ -47,18 +100,19 @@ class HoneypotDetector:
             mint_authority = token_data.get("mint_authority")
             freeze_authority = token_data.get("freeze_authority")
             owner_renounced = bool(token_data.get("owner_renounced", False))
-            total_supply = int(token_data.get("total_supply", 0) or 0)
+            total_supply = self._safe_int(token_data.get("total_supply"), 0)
 
-            metadata_score = float(token_data.get("metadata_score", 0.0) or 0.0)
+            metadata_score = self._safe_float(token_data.get("metadata_score"), 0.0)
             metadata_flags = list(token_data.get("metadata_risk_flags", []) or [])
 
-            creator_failure_rate = float(token_data.get("creator_failure_rate", 0.0) or 0.0)
-            creator_success_rate = float(token_data.get("creator_success_rate", 0.0) or 0.0)
-            creator_tokens_created = int(token_data.get("creator_tokens_created", 0) or 0)
+            creator_metrics = self._extract_creator_metrics(token_data)
+            creator_failure_rate = creator_metrics["creator_failure_rate"]
+            creator_success_rate = creator_metrics["creator_success_rate"]
+            creator_tokens_created = creator_metrics["creator_tokens_created"]
 
-            top_holder_ratio = float(token_data.get("top_holder_ratio", 0.0) or 0.0)
-            holder_concentration = float(token_data.get("holder_concentration", 0.0) or 0.0)
-            wallet_cluster_score = float(token_data.get("wallet_cluster_score", 0.0) or 0.0)
+            top_holder_ratio = self._safe_float(token_data.get("top_holder_ratio"), 0.0)
+            holder_concentration = self._safe_float(token_data.get("holder_concentration"), 0.0)
+            wallet_cluster_score = self._safe_float(token_data.get("wallet_cluster_score"), 0.0)
 
             # 1) Authorities
             if freeze_authority:

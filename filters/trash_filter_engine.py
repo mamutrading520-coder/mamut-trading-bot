@@ -52,6 +52,22 @@ class TrashFilterEngine:
             "null",
         }
 
+    def _safe_float(self, value: Any, default: float = 0.0) -> float:
+        try:
+            if value is None:
+                return default
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _safe_int(self, value: Any, default: int = 0) -> int:
+        try:
+            if value is None:
+                return default
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
     def _calculate_authority_risk(self, token_data: Dict[str, Any]) -> Dict[str, Any]:
         """Calculate authority/permission risk score."""
         try:
@@ -361,6 +377,61 @@ class TrashFilterEngine:
                 "metadata_present": False,
             }
     
+    def _build_honeypot_input(
+        self,
+        token_data: Dict[str, Any],
+        wallet_cluster_risk: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Normalize pipeline payload into the contract expected by HoneypotDetector."""
+        creator_analysis = token_data.get("analysis", {}) or {}
+
+        creator_tokens_created = self._safe_int(
+            token_data.get("creator_tokens_created", creator_analysis.get("total_tokens")),
+        )
+        creator_failed_tokens = self._safe_int(
+            token_data.get("creator_failed_tokens", creator_analysis.get("failed_tokens")),
+        )
+        creator_successful_tokens = self._safe_int(
+            token_data.get("creator_successful_tokens", creator_analysis.get("successful_tokens")),
+        )
+
+        creator_failure_rate = token_data.get("creator_failure_rate")
+        if creator_failure_rate is None:
+            creator_failure_rate = creator_analysis.get("failure_rate")
+        if creator_failure_rate is None and creator_tokens_created > 0:
+            creator_failure_rate = creator_failed_tokens / creator_tokens_created
+
+        creator_success_rate = token_data.get("creator_success_rate")
+        if creator_success_rate is None:
+            creator_success_rate = creator_analysis.get("success_rate")
+        if creator_success_rate is None and creator_tokens_created > 0:
+            creator_success_rate = creator_successful_tokens / creator_tokens_created
+
+        top_holder_percentage = self._safe_float(token_data.get("top_holder_percentage", 0.0))
+        holder_concentration = token_data.get("holder_concentration")
+        if holder_concentration is None:
+            holder_concentration = token_data.get("holder_concentration_score")
+        holder_concentration = self._safe_float(holder_concentration, 0.0)
+
+        # Convert 0..100 concentration scores to ratio scale expected by HoneypotDetector.
+        if holder_concentration > 1.0:
+            holder_concentration = holder_concentration / 100.0
+
+        return {
+            **token_data,
+            "mint_authority": None if self._is_null_like(token_data.get("mint_authority")) else token_data.get("mint_authority"),
+            "freeze_authority": None if self._is_null_like(token_data.get("freeze_authority")) else token_data.get("freeze_authority"),
+            "creator_tokens_created": creator_tokens_created,
+            "creator_failure_rate": self._safe_float(creator_failure_rate, 0.0),
+            "creator_success_rate": self._safe_float(creator_success_rate, 0.0),
+            "top_holder_ratio": max(0.0, min(1.0, top_holder_percentage / 100.0)),
+            "holder_concentration": max(0.0, min(1.0, holder_concentration)),
+            # Normalize wallet cluster score (0-100) to 0-1 scale for HoneypotDetector.
+            "wallet_cluster_score": self._safe_float(
+                wallet_cluster_risk.get("wallet_cluster_risk_score", wallet_cluster_risk.get("score", 0.0)),
+                0.0,
+            ) / 100.0,
+        }
 
     def _combine_risks(
         self,
@@ -476,12 +547,11 @@ class TrashFilterEngine:
             metadata_risk = self._calculate_metadata_risk(token_data)
             wallet_cluster_risk = await self.wallet_cluster_checker.analyze(token_data)
 
-            # Normalize wallet cluster score (0-100) to 0-1 scale for HoneypotDetector
-            enriched_data = {
-                **token_data,
-                "wallet_cluster_score": wallet_cluster_risk.get("wallet_cluster_risk_score", 0.0) / 100.0,
-            }
-            honeypot_risk = await self.honeypot_detector.analyze(enriched_data)
+            honeypot_input = self._build_honeypot_input(
+                token_data=token_data,
+                wallet_cluster_risk=wallet_cluster_risk,
+            )
+            honeypot_risk = await self.honeypot_detector.analyze(honeypot_input)
 
             aggregate = self._combine_risks(
                 authority_risk=authority_risk,

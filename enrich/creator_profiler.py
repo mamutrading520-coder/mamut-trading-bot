@@ -54,6 +54,7 @@ class CreatorProfiler:
                 "average_score": 0.0,
                 "wallet_age_days": 0,
                 "failure_rate": 0.0,
+                "success_rate": 0.0,
                 "risk_factors": [],
                 "is_trusted": False,
                 "is_blacklisted": False,
@@ -74,6 +75,7 @@ class CreatorProfiler:
             
             if analysis["total_tokens"] > 0:
                 analysis["failure_rate"] = analysis["failed_tokens"] / analysis["total_tokens"]
+                analysis["success_rate"] = analysis["successful_tokens"] / analysis["total_tokens"]
             
             # Delegate to CreatorRiskChecker for consistent scoring
             risk_score, checker_result = self.risk_checker.check_creator_risk(analysis)
@@ -88,6 +90,43 @@ class CreatorProfiler:
             logger.error(f"Error calculating creator risk: {e}")
             self.failed_count += 1
             return 50.0, {"creator": creator, "error": str(e)}
+    
+    def _build_downstream_creator_metrics(
+        self,
+        creator: Optional[str],
+        creator_resolved: bool,
+        analysis: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Flatten creator metrics so downstream filters receive a stable payload contract."""
+        total_tokens = int(analysis.get("total_tokens", 0) or 0)
+        failed_tokens = int(analysis.get("failed_tokens", 0) or 0)
+        successful_tokens = int(analysis.get("successful_tokens", 0) or 0)
+
+        failure_rate = analysis.get("failure_rate")
+        if failure_rate is None:
+            failure_rate = (failed_tokens / total_tokens) if total_tokens > 0 else 0.0
+
+        success_rate = analysis.get("success_rate")
+        if success_rate is None:
+            success_rate = (successful_tokens / total_tokens) if total_tokens > 0 else 0.0
+
+        wallet_age_days = analysis.get("wallet_age_days")
+        is_trusted = bool(analysis.get("is_trusted", False))
+        is_blacklisted = bool(analysis.get("is_blacklisted", False))
+
+        return {
+            "creator": creator,
+            "creator_resolved": creator_resolved,
+            "creator_tokens_created": total_tokens,
+            "creator_total_tokens": total_tokens,
+            "creator_failed_tokens": failed_tokens,
+            "creator_successful_tokens": successful_tokens,
+            "creator_failure_rate": float(failure_rate or 0.0),
+            "creator_success_rate": float(success_rate or 0.0),
+            "creator_wallet_age_days": wallet_age_days,
+            "creator_is_trusted": is_trusted,
+            "creator_is_blacklisted": is_blacklisted,
+        }
     
     async def profile_creator(self, token_data: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -107,22 +146,31 @@ class CreatorProfiler:
             creator_resolved = normalized_creator not in {"", "UNKNOWN", "unknown"}
 
             if not creator_resolved:
+                analysis = {
+                    "total_tokens": 0,
+                    "failed_tokens": 0,
+                    "successful_tokens": 0,
+                    "wallet_age_days": None,
+                    "failure_rate": 0.0,
+                    "success_rate": 0.0,
+                    "is_blacklisted": False,
+                    "is_trusted": False,
+                    "reasons": ["Creator no resuelto"],
+                    "warnings": ["Creator identity unavailable"],
+                }
+
                 self.analyzed_count += 1
                 return {
                     "creator": creator,
                     "mint": mint,
                     "risk_score": 50.0,
                     "risk_level": "MEDIUM",
-                    "analysis": {
-                        "total_tokens": 0,
-                        "successful_tokens": 0,
-                        "wallet_age_days": None,
-                        "is_blacklisted": False,
-                        "is_trusted": False,
-                        "reasons": ["Creator no resuelto"],
-                        "warnings": ["Creator identity unavailable"],
-                    },
-                    "creator_resolved": False,
+                    "analysis": analysis,
+                    **self._build_downstream_creator_metrics(
+                        creator=creator,
+                        creator_resolved=False,
+                        analysis=analysis,
+                    ),
                     "timestamp": datetime.utcnow().isoformat(),
                 }
 
@@ -148,7 +196,11 @@ class CreatorProfiler:
                 "risk_score": risk_score,
                 "risk_level": self._get_risk_level(risk_score),
                 "analysis": analysis,
-                "creator_resolved": creator_resolved,
+                **self._build_downstream_creator_metrics(
+                    creator=creator,
+                    creator_resolved=creator_resolved,
+                    analysis=analysis,
+                ),
                 "timestamp": datetime.utcnow().isoformat(),
             }
             
