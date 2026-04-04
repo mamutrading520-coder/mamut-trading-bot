@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 
 import httpx
 
@@ -23,6 +23,16 @@ class RaydiumListener:
         self.event_bus = get_event_bus()
         self.api_url = settings.raydium_api_url
         self.pool_timeout = settings.raydium_pool_timeout
+        self.fetch_timeout = max(2, int(getattr(settings, "raydium_fetch_timeout", 10)))
+        self.refresh_interval = max(2, int(getattr(settings, "raydium_refresh_interval", 5)))
+        self.stale_cache_ttl = max(
+            self.refresh_interval,
+            int(getattr(settings, "raydium_stale_cache_ttl", 60)),
+        )
+        self.fetch_failure_backoff_max = max(
+            self.refresh_interval,
+            int(getattr(settings, "raydium_fetch_failure_backoff_max", 20)),
+        )
 
         self.pools_found = 0
         self.pools_missed = 0
@@ -33,16 +43,65 @@ class RaydiumListener:
         # mint -> monitoring context
         self.monitored_tokens: Dict[str, Dict[str, Any]] = {}
 
+        # snapshot/cache state
+        self.pool_cache: List[Dict[str, Any]] = []
+        self.pool_index_cache: Dict[str, Dict[str, Any]] = {}
+        self.last_successful_refresh_at: Optional[float] = None
+        self.last_refresh_error: Optional[str] = None
+        self.fetch_successes = 0
+        self.fetch_failures = 0
+        self.consecutive_fetch_failures = 0
+
     async def _get_http_client(self) -> httpx.AsyncClient:
         """Get or create HTTP client."""
         if self.http_client is None:
-            self.http_client = httpx.AsyncClient(timeout=10)
+            timeout = httpx.Timeout(
+                timeout=self.fetch_timeout,
+                connect=min(5.0, float(self.fetch_timeout)),
+                read=float(self.fetch_timeout),
+                write=float(self.fetch_timeout),
+                pool=float(self.fetch_timeout),
+            )
+            limits = httpx.Limits(max_connections=10, max_keepalive_connections=5)
+            self.http_client = httpx.AsyncClient(
+                timeout=timeout,
+                limits=limits,
+                follow_redirects=True,
+                headers={"User-Agent": "MamutRaydiumListener/1.0"},
+            )
         return self.http_client
 
-    async def _fetch_raydium_pools(self) -> Optional[List[Dict[str, Any]]]:
-        """
-        Fetch all Raydium pools from the configured API.
-        """
+    @staticmethod
+    def _normalize_pool_payload(data: Any) -> List[Dict[str, Any]]:
+        """Normalize different response shapes into a flat list of Raydium pools."""
+        normalized: List[Dict[str, Any]] = []
+
+        def _collect(value: Any) -> None:
+            if isinstance(value, list):
+                normalized.extend(item for item in value if isinstance(item, dict))
+            elif isinstance(value, dict):
+                for key in ("official", "unOfficial", "data", "pools", "pairs"):
+                    nested = value.get(key)
+                    if isinstance(nested, list):
+                        normalized.extend(item for item in nested if isinstance(item, dict))
+
+        _collect(data)
+
+        deduped: List[Dict[str, Any]] = []
+        seen = set()
+        for pool in normalized:
+            mint_a = pool.get("mintA", {}).get("address", "")
+            mint_b = pool.get("mintB", {}).get("address", "")
+            pool_id = pool.get("id") or pool.get("ammId") or f"{mint_a}:{mint_b}"
+            if not pool_id or pool_id in seen:
+                continue
+            seen.add(pool_id)
+            deduped.append(pool)
+
+        return deduped
+
+    async def _fetch_raydium_pools(self) -> Tuple[Optional[List[Dict[str, Any]]], Optional[str]]:
+        """Fetch all Raydium pools from the configured API."""
         try:
             client = await self._get_http_client()
             logger.debug(f"Fetching Raydium pools from {self.api_url}")
@@ -50,32 +109,88 @@ class RaydiumListener:
             response = await client.get(self.api_url)
             response.raise_for_status()
             data = response.json()
+            pools = self._normalize_pool_payload(data)
 
-            official = data.get("official", [])
-            unofficial = data.get("unOfficial", [])
-            pools = official + unofficial
+            if not pools:
+                return None, "empty pool payload"
 
             logger.debug(f"Fetched {len(pools)} Raydium pools")
-            return pools
+            return pools, None
 
-        except asyncio.TimeoutError:
-            logger.warning("Timeout fetching Raydium pools")
-            return None
+        except httpx.TimeoutException:
+            return None, f"timeout after {self.fetch_timeout}s"
+        except httpx.HTTPStatusError as e:
+            return None, f"http {e.response.status_code} while fetching Raydium pools"
+        except httpx.HTTPError as e:
+            return None, f"transport error fetching Raydium pools: {e!r}"
         except Exception as e:
-            logger.error(f"Error fetching Raydium pools: {e}")
+            return None, f"unexpected error fetching Raydium pools: {e!r}"
+
+    def _snapshot_age_seconds(self, now_ts: Optional[float] = None) -> Optional[int]:
+        if self.last_successful_refresh_at is None:
             return None
+        now_ts = now_ts or datetime.utcnow().timestamp()
+        return max(0, int(now_ts - self.last_successful_refresh_at))
+
+    def _has_usable_snapshot(self, now_ts: Optional[float] = None) -> bool:
+        if not self.pool_index_cache or self.last_successful_refresh_at is None:
+            return False
+        age = self._snapshot_age_seconds(now_ts)
+        return age is not None and age <= self.stale_cache_ttl
+
+    def _should_log_fetch_warning(self) -> bool:
+        return self.consecutive_fetch_failures in {1, 3, 5} or (
+            self.consecutive_fetch_failures > 0 and self.consecutive_fetch_failures % 10 == 0
+        )
+
+    def _next_poll_interval(self) -> int:
+        if self.consecutive_fetch_failures <= 0:
+            return self.refresh_interval
+        backoff = min(
+            self.refresh_interval * (2 ** min(self.consecutive_fetch_failures - 1, 3)),
+            self.fetch_failure_backoff_max,
+        )
+        return max(self.refresh_interval, int(backoff))
+
+    async def _refresh_pool_snapshot(self) -> Tuple[Dict[str, Dict[str, Any]], bool]:
+        """Refresh Raydium snapshot, falling back to cached data when still usable."""
+        now_ts = datetime.utcnow().timestamp()
+        pools, error_message = await self._fetch_raydium_pools()
+
+        if pools:
+            self.pool_cache = pools
+            self.pool_index_cache = self._build_pool_index(pools)
+            self.last_successful_refresh_at = now_ts
+            self.last_refresh_error = None
+            self.fetch_successes += 1
+            self.consecutive_fetch_failures = 0
+            return self.pool_index_cache, True
+
+        self.fetch_failures += 1
+        self.consecutive_fetch_failures += 1
+        self.last_refresh_error = error_message or "unknown refresh error"
+
+        if self._has_usable_snapshot(now_ts):
+            if self._should_log_fetch_warning():
+                logger.warning(
+                    "Raydium refresh failed (%s). Using cached snapshot age=%ss.",
+                    self.last_refresh_error,
+                    self._snapshot_age_seconds(now_ts),
+                )
+            return self.pool_index_cache, False
+
+        if self._should_log_fetch_warning():
+            logger.warning(
+                "Raydium refresh failed and no usable snapshot is available: %s",
+                self.last_refresh_error,
+            )
+        return {}, False
 
     @staticmethod
     def _build_pool_index(
         pools: List[Dict[str, Any]],
     ) -> Dict[str, Dict[str, Any]]:
-        """
-        Build an O(1) mint-address → pool-info lookup from the pools list.
-
-        Each pool can appear under both its mintA and mintB addresses so that
-        any monitored token can be found with a single dict lookup instead of
-        an O(N) linear scan.
-        """
+        """Build an O(1) mint-address → pool-info lookup from the pools list."""
         index: Dict[str, Dict[str, Any]] = {}
         for pool in pools:
             mint_a = pool.get("mintA", {}).get("address", "")
@@ -91,9 +206,7 @@ class RaydiumListener:
         mint: str,
         pools: List[Dict[str, Any]],
     ) -> Optional[Dict[str, Any]]:
-        """
-        Search token mint in current Raydium pools.
-        """
+        """Search token mint in current Raydium pools."""
         try:
             for pool in pools:
                 mint_a = pool.get("mintA", {}).get("address", "")
@@ -124,9 +237,7 @@ class RaydiumListener:
         mint: str,
         pool_index: Dict[str, Dict[str, Any]],
     ) -> Optional[Dict[str, Any]]:
-        """
-        O(1) pool lookup using a pre-built pool index.
-        """
+        """O(1) pool lookup using a pre-built pool index."""
         try:
             pool = pool_index.get(mint)
             if pool is None:
@@ -154,11 +265,7 @@ class RaydiumListener:
         mint: str,
         context: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """
-        Start monitoring token for Raydium pool.
-
-        Context is stored so PoolFound / PoolSearchTimeout can emit richer data.
-        """
+        """Start monitoring token for Raydium pool."""
         try:
             current_time = datetime.utcnow().timestamp()
             context = context or {}
@@ -196,16 +303,14 @@ class RaydiumListener:
         await self.stop_monitoring(mint)
 
     async def check_token_pool(self, mint: str) -> Optional[Dict[str, Any]]:
-        """
-        Check if token has a Raydium pool.
-        """
+        """Check if token has a Raydium pool."""
         try:
-            pools = await self._fetch_raydium_pools()
-            if not pools:
-                logger.debug(f"Could not fetch pools for {mint[:8]}...")
+            pool_index, _ = await self._refresh_pool_snapshot()
+            if not pool_index:
+                logger.debug(f"Could not refresh Raydium snapshot for {mint[:8]}...")
                 return None
 
-            pool_data = self._search_token_in_pools(mint, pools)
+            pool_data = self._lookup_token_in_index(mint, pool_index)
             if pool_data:
                 await self._handle_pool_found(mint, pool_data)
                 return pool_data
@@ -216,14 +321,7 @@ class RaydiumListener:
         return None
 
     async def monitor_pools(self) -> None:
-        """
-        Monitor all tracked tokens for pool appearance.
-        Emits PoolFound or PoolSearchTimeout.
-
-        Pools are fetched once per cycle and indexed by mint address so that
-        all monitored tokens can be checked with O(1) lookups instead of an
-        O(N) linear scan per token.
-        """
+        """Monitor tracked tokens for pool appearance using a resilient cached snapshot."""
         if self.running:
             logger.warning("Raydium pool monitor already running")
             return
@@ -236,13 +334,19 @@ class RaydiumListener:
                 try:
                     mints_to_check = list(self.monitored_tokens.keys())
                     if not mints_to_check:
-                        await asyncio.sleep(5)
+                        await asyncio.sleep(self.refresh_interval)
                         continue
 
-                    pools = await self._fetch_raydium_pools()
-                    pool_index: Dict[str, Dict[str, Any]] = (
-                        self._build_pool_index(pools) if pools else {}
-                    )
+                    now_ts = datetime.utcnow().timestamp()
+                    pool_index, refreshed = await self._refresh_pool_snapshot()
+                    snapshot_usable = bool(pool_index) and self._has_usable_snapshot(now_ts)
+
+                    if not snapshot_usable:
+                        logger.debug(
+                            "Skipping Raydium timeout evaluation; no usable pool snapshot is available"
+                        )
+                        await asyncio.sleep(self._next_poll_interval())
+                        continue
 
                     for mint in mints_to_check:
                         watch_context = self.monitored_tokens.get(mint, {})
@@ -269,6 +373,7 @@ class RaydiumListener:
                                     "elapsed_seconds": int(elapsed),
                                     "timeout_seconds": self.pool_timeout,
                                     "watch_started_at": watch_context.get("watch_started_at"),
+                                    "snapshot_age_seconds": self._snapshot_age_seconds(now_ts),
                                 },
                                 source="RaydiumListener",
                                 timestamp=datetime.utcnow(),
@@ -292,6 +397,8 @@ class RaydiumListener:
                                     "watch_started_at": watch_context.get("watch_started_at"),
                                     "elapsed_seconds": int(elapsed),
                                     "pool_found_at": datetime.utcnow().isoformat(),
+                                    "snapshot_age_seconds": self._snapshot_age_seconds(now_ts),
+                                    "snapshot_fresh": refreshed,
                                     "pool": pool_data,
                                 },
                                 source="RaydiumListener",
@@ -299,36 +406,44 @@ class RaydiumListener:
                             )
                             await self.event_bus.emit(pool_event)
 
-                    await asyncio.sleep(5)
+                    await asyncio.sleep(self._next_poll_interval())
 
                 except asyncio.CancelledError:
                     logger.info("Pool monitor cancelled")
                     raise
                 except Exception as e:
                     logger.error(f"Error in pool monitor: {e}")
-                    await asyncio.sleep(5)
+                    await asyncio.sleep(self._next_poll_interval())
         finally:
             self.running = False
             logger.info("Raydium pool monitor stopped")
 
     def get_stats(self) -> dict:
         """Get listener statistics."""
+        total_terminal = self.pools_found + self.pools_missed
         return {
             "running": self.running,
             "pools_found": self.pools_found,
             "pools_missed": self.pools_missed,
             "currently_monitoring": len(self.monitored_tokens),
-            "find_rate": (
-                self.pools_found / (self.pools_found + self.pools_missed)
-                if (self.pools_found + self.pools_missed) > 0
-                else 0
-            ),
+            "find_rate": self.pools_found / total_terminal if total_terminal > 0 else 0,
+            "fetch_successes": self.fetch_successes,
+            "fetch_failures": self.fetch_failures,
+            "consecutive_fetch_failures": self.consecutive_fetch_failures,
+            "cached_pools": len(self.pool_cache),
+            "cached_index_entries": len(self.pool_index_cache),
+            "last_snapshot_age_seconds": self._snapshot_age_seconds(),
+            "last_refresh_error": self.last_refresh_error,
         }
 
     async def close(self) -> None:
         """Close HTTP client."""
         await self.stop()
         self.monitored_tokens.clear()
+        self.pool_cache.clear()
+        self.pool_index_cache.clear()
+        self.last_successful_refresh_at = None
+        self.last_refresh_error = None
 
         if self.http_client:
             await self.http_client.aclose()

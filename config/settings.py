@@ -36,6 +36,10 @@ class Settings(BaseSettings):
     raydium_api_url: str = "https://api.raydium.io/v2/sdk/liquidity/mainnet.json"
     raydium_pool_timeout: int = RAYDIUM_POOL_TIMEOUT_SECONDS
     raydium_pool_min_liquidity: float = RAYDIUM_MIN_LIQUIDITY_SOL
+    raydium_fetch_timeout: int = 10
+    raydium_refresh_interval: int = 5
+    raydium_stale_cache_ttl: int = 60
+    raydium_fetch_failure_backoff_max: int = 20
 
     # Solana RPC Configuration
     solana_rpc_url: str = "https://api.mainnet-beta.solana.com"
