@@ -19,6 +19,7 @@ from config.thresholds import (
     TOKEN_LOCK_TIMEOUT_SECONDS,
 )
 
+
 class Settings(BaseSettings):
     pump_ws_url: str = "wss://pumpportal.fun/api/data"
     pump_reconnect_delay: int = 5
@@ -29,6 +30,8 @@ class Settings(BaseSettings):
     pump_processing_warn_threshold: float = 3.0
     pump_stall_timeout: float = 20.0
     pump_watchdog_interval: float = 5.0
+    pump_queue_maxsize: int = 1000
+    pump_parser_workers: int = 3
 
     discovery_dedup_window: int = 180
     discovery_dedup_max_tracked: int = 5000
