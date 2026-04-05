@@ -254,7 +254,6 @@ class PumpListener:
         try:
             while self.running:
                 try:
-                    self._mark_progress(f"worker_{worker_id}_waiting")
                     item = await asyncio.wait_for(self._queue.get(), timeout=1.0)
                 except asyncio.TimeoutError:
                     continue
@@ -295,16 +294,30 @@ class PumpListener:
         self._worker_tasks = []
 
     async def _watchdog_loop(self) -> None:
-        """Detect dead sockets and unusual listener stalls."""
+        """Detect dead sockets and real stalls, but ignore normal idle worker states."""
         try:
             while self.running:
                 await asyncio.sleep(self.watchdog_interval)
                 if not self.running or not self.ws_connected or not self.last_progress_at:
                     continue
 
+                queue_size = self._queue.qsize()
+                stage = self.last_stage or ""
+
+                if stage == "waiting_for_message" and queue_size == 0:
+                    continue
+
+                if stage.startswith("worker_") and stage.endswith("_waiting") and queue_size == 0:
+                    continue
+
                 stalled_for = (datetime.utcnow() - self.last_progress_at).total_seconds()
                 threshold = self.stall_timeout
-                if self.last_stage == "waiting_for_message":
+
+                if stage.startswith("worker_") and ("_parsing" in stage or "_emitting" in stage):
+                    threshold = max(self.stall_timeout, self.parse_timeout + self.emit_timeout + 5.0)
+                elif queue_size > 0:
+                    threshold = max(self.stall_timeout, 15.0)
+                elif stage == "waiting_for_message":
                     threshold = max(float(self.receive_timeout) + 10.0, self.stall_timeout)
 
                 if stalled_for < threshold:
@@ -312,7 +325,7 @@ class PumpListener:
 
                 logger.warning(
                     "Pump listener stall detected | stalled_for=%.1fs | stage=%s | preview=%s | queue=%s"
-                    % (stalled_for, self.last_stage, self.last_message_preview, self._queue.qsize())
+                    % (stalled_for, stage, self.last_message_preview, queue_size)
                 )
                 self._reconnect_requested = True
                 await self.disconnect()
