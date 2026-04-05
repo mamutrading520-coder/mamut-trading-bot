@@ -94,6 +94,14 @@ class PumpEventParser:
         re.IGNORECASE,
     )
     _OFFICIAL_PREFIX_RE = re.compile(r"^\s*official\b", re.IGNORECASE)
+    _STATEMENT_SUBJECT_RE = re.compile(
+        r"^(?:men|women|boys|girls|guys|people|they|we|you|i|he|she|it|bro|bros|devs?)\b",
+        re.IGNORECASE,
+    )
+    _STATEMENT_LINKER_RE = re.compile(
+        r"\b(?:cant|can't|cannot|can|dont|don't|do|does|did|is|are|was|were|be|need|needs|like|love|hate|deserve|deserves|should|shouldn't|must|will|wont|won't)\b",
+        re.IGNORECASE,
+    )
     _PROMO_WORDS = {
         "official", "check", "contract", "ca", "dev", "developer", "team", "shilled",
         "went", "moon", "mooned", "pump", "pumped", "call", "called", "buy", "proof",
@@ -290,6 +298,7 @@ class PumpEventParser:
 
         promo_count = sum(1 for token in lowered_tokens if token in self._PROMO_WORDS)
         all_caps_ratio = sum(1 for ch in normalized if ch.isupper()) / max(sum(1 for ch in normalized if ch.isalpha()), 1)
+        lowercase_ratio = sum(1 for ch in normalized if ch.islower()) / max(sum(1 for ch in normalized if ch.isalpha()), 1)
 
         if promo_count >= 2 and len(tokens) >= 4:
             return True
@@ -301,6 +310,9 @@ class PumpEventParser:
             return True
 
         if lowered.startswith("the ") and self._NARRATIVE_VERB_RE.search(normalized) and len(tokens) >= 4:
+            return True
+
+        if self._STATEMENT_SUBJECT_RE.match(normalized) and self._STATEMENT_LINKER_RE.search(normalized) and len(tokens) >= 3 and lowercase_ratio >= 0.80:
             return True
 
         return False
