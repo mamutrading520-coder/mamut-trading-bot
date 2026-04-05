@@ -23,6 +23,12 @@ class Settings(BaseSettings):
     pump_ws_url: str = "wss://pumpportal.fun/api/data"
     pump_reconnect_delay: int = 5
     pump_max_retries: int = 10
+    pump_receive_timeout: int = 60
+    pump_parse_timeout: float = 5.0
+    pump_emit_timeout: float = 5.0
+    pump_processing_warn_threshold: float = 3.0
+    pump_stall_timeout: float = 20.0
+    pump_watchdog_interval: float = 5.0
 
     discovery_dedup_window: int = 180
     discovery_dedup_max_tracked: int = 5000
