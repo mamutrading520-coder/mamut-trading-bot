@@ -79,6 +79,25 @@ class PumpEventParser:
         re.IGNORECASE,
     )
     _VALID_SYMBOL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_$.-]{0,19}$")
+    _WORD_TOKEN_RE = re.compile(r"[A-Za-zÀ-ÿ0-9']+")
+    _PURE_MATH_STATEMENT_RE = re.compile(r"^\s*\d+(?:\s*[+\-*/xX]\s*\d+)+(?:\s*=\s*\d+)?\s*$")
+    _PROMOTIONAL_PHRASE_RE = re.compile(
+        r"\b(?:same\s+dev(?:eloper)?\s+as|same\s+team\s+as|btw\s+check|check\s+(?:this|it|ca)|official\s+ca|contract\s+below|he\s+shilled|she\s+shilled|they\s+shilled|went\s+\d+(?:k|m|x)?)\b",
+        re.IGNORECASE,
+    )
+    _NARRATIVE_PREFIX_RE = re.compile(
+        r"^\s*(?:he|she|they|it|pilot\s+coin|proof\s+that|this\s+will|just\s+buy|hear\s+me\s+out)\b",
+        re.IGNORECASE,
+    )
+    _NARRATIVE_VERB_RE = re.compile(
+        r"\b(?:went|shilled|called|posted|pumped|sent|made|did|hit|flew|mooned|rugged|launched)\b",
+        re.IGNORECASE,
+    )
+    _OFFICIAL_PREFIX_RE = re.compile(r"^\s*official\b", re.IGNORECASE)
+    _PROMO_WORDS = {
+        "official", "check", "contract", "ca", "dev", "developer", "team", "shilled",
+        "went", "moon", "mooned", "pump", "pumped", "call", "called", "buy", "proof",
+    }
 
     def parse(self, data: Dict[str, Any]) -> Optional[ParsedTokenEvent]:
         """Parse token creation event"""
@@ -180,6 +199,9 @@ class PumpEventParser:
         if self._looks_like_prompt_text(value):
             return False
 
+        if self._looks_like_promotional_or_narrative_name(value):
+            return False
+
         non_alnum_ratio = sum(1 for ch in value if not ch.isalnum() and ch != " ") / max(len(value), 1)
         if len(value) >= 8 and non_alnum_ratio > 0.35:
             return False
@@ -244,6 +266,41 @@ class PumpEventParser:
             return True
 
         if any(pronoun in lowered for pronoun in [" her ", " him ", " them ", " it "]) and self._IMPERATIVE_PROMPT_RE.match(normalized):
+            return True
+
+        return False
+
+    def _looks_like_promotional_or_narrative_name(self, value: str) -> bool:
+        normalized = value.strip()
+        lowered = normalized.lower()
+        tokens = self._WORD_TOKEN_RE.findall(normalized)
+        lowered_tokens = [token.lower() for token in tokens]
+
+        if self._PURE_MATH_STATEMENT_RE.fullmatch(normalized):
+            return True
+
+        if self._OFFICIAL_PREFIX_RE.match(normalized) and len(tokens) >= 2:
+            return True
+
+        if self._PROMOTIONAL_PHRASE_RE.search(normalized):
+            return True
+
+        if self._NARRATIVE_PREFIX_RE.match(normalized) and len(tokens) >= 3:
+            return True
+
+        promo_count = sum(1 for token in lowered_tokens if token in self._PROMO_WORDS)
+        all_caps_ratio = sum(1 for ch in normalized if ch.isupper()) / max(sum(1 for ch in normalized if ch.isalpha()), 1)
+
+        if promo_count >= 2 and len(tokens) >= 4:
+            return True
+
+        if self._NARRATIVE_VERB_RE.search(normalized) and len(tokens) >= 4:
+            return True
+
+        if all_caps_ratio >= 0.85 and len(tokens) >= 4:
+            return True
+
+        if lowered.startswith("the ") and self._NARRATIVE_VERB_RE.search(normalized) and len(tokens) >= 4:
             return True
 
         return False
