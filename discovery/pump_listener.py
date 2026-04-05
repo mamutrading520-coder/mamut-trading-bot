@@ -55,6 +55,12 @@ class PumpListener:
         self.last_progress_at: Optional[datetime] = None
         self.last_stage: str = "idle"
         self.last_message_preview: str = ""
+        self.last_ws_recv_at: Optional[datetime] = None
+        self.last_queue_put_at: Optional[datetime] = None
+        self.last_queue_get_at: Optional[datetime] = None
+        self.last_emit_at: Optional[datetime] = None
+        self._inflight_messages: int = 0
+
         self._watchdog_task: Optional[asyncio.Task] = None
         self._worker_tasks: List[asyncio.Task] = []
         self._reconnect_requested = False
@@ -138,6 +144,7 @@ class PumpListener:
 
             try:
                 response = await asyncio.wait_for(self.ws.recv(), timeout=2.0)
+                self.last_ws_recv_at = datetime.utcnow()
                 self._mark_progress("subscribed", response)
                 logger.info(f"Subscription response: {response[:200]}")
                 return True
@@ -188,6 +195,7 @@ class PumpListener:
         preview = self._short_preview(message)
         try:
             self._queue.put_nowait((message_count, message))
+            self.last_queue_put_at = datetime.utcnow()
             self._mark_progress("message_queued", preview)
         except asyncio.QueueFull:
             self.messages_dropped += 1
@@ -236,6 +244,7 @@ class PumpListener:
         try:
             self._mark_progress(f"worker_{worker_id}_emitting", preview)
             await asyncio.wait_for(self.event_bus.emit(token_event), timeout=self.emit_timeout)
+            self.last_emit_at = datetime.utcnow()
             self._mark_progress(f"worker_{worker_id}_emitted", preview)
         except asyncio.TimeoutError:
             self.tokens_failed += 1
@@ -263,9 +272,12 @@ class PumpListener:
                     logger.info(f"Pump parser worker {worker_id} received stop signal")
                     break
 
+                self.last_queue_get_at = datetime.utcnow()
+                self._inflight_messages += 1
                 try:
                     await self._process_queued_message(worker_id, item)
                 finally:
+                    self._inflight_messages = max(0, self._inflight_messages - 1)
                     self._queue.task_done()
         except asyncio.CancelledError:
             logger.info(f"Pump parser worker {worker_id} cancelled")
@@ -294,38 +306,37 @@ class PumpListener:
         self._worker_tasks = []
 
     async def _watchdog_loop(self) -> None:
-        """Detect dead sockets and real stalls, but ignore normal idle worker states."""
+        """Watch backlog health only. Idle sockets are handled by receive_timeout."""
         try:
             while self.running:
                 await asyncio.sleep(self.watchdog_interval)
-                if not self.running or not self.ws_connected or not self.last_progress_at:
+                if not self.running or not self.ws_connected:
                     continue
 
                 queue_size = self._queue.qsize()
-                stage = self.last_stage or ""
+                inflight = self._inflight_messages
 
-                if stage == "waiting_for_message" and queue_size == 0:
+                if queue_size == 0:
                     continue
 
-                if stage.startswith("worker_") and stage.endswith("_waiting") and queue_size == 0:
-                    continue
+                now = datetime.utcnow()
+                consumer_markers = [marker for marker in [self.last_queue_get_at, self.last_emit_at] if marker]
+                producer_markers = [marker for marker in [self.last_ws_recv_at, self.last_queue_put_at] if marker]
+                last_consumer_progress = max(consumer_markers) if consumer_markers else None
+                last_producer_progress = max(producer_markers) if producer_markers else None
 
-                stalled_for = (datetime.utcnow() - self.last_progress_at).total_seconds()
-                threshold = self.stall_timeout
+                if last_consumer_progress is None:
+                    stalled_for = (now - (last_producer_progress or now)).total_seconds()
+                else:
+                    stalled_for = (now - last_consumer_progress).total_seconds()
 
-                if stage.startswith("worker_") and ("_parsing" in stage or "_emitting" in stage):
-                    threshold = max(self.stall_timeout, self.parse_timeout + self.emit_timeout + 5.0)
-                elif queue_size > 0:
-                    threshold = max(self.stall_timeout, 15.0)
-                elif stage == "waiting_for_message":
-                    threshold = max(float(self.receive_timeout) + 10.0, self.stall_timeout)
-
+                threshold = max(self.stall_timeout, 15.0)
                 if stalled_for < threshold:
                     continue
 
                 logger.warning(
-                    "Pump listener stall detected | stalled_for=%.1fs | stage=%s | preview=%s | queue=%s"
-                    % (stalled_for, stage, self.last_message_preview, queue_size)
+                    "Pump listener backlog stall detected | stalled_for=%.1fs | queue=%s | inflight=%s | stage=%s | preview=%s"
+                    % (stalled_for, queue_size, inflight, self.last_stage, self.last_message_preview)
                 )
                 self._reconnect_requested = True
                 await self.disconnect()
@@ -348,6 +359,7 @@ class PumpListener:
                     if not message:
                         continue
 
+                    self.last_ws_recv_at = datetime.utcnow()
                     message_count += 1
                     logger.debug(f"Received message #{message_count}: {str(message)[:100]}")
                     self._enqueue_message(message, message_count)
@@ -371,7 +383,7 @@ class PumpListener:
         finally:
             self.ws_connected = False
             logger.info(
-                f"Receive loop ended. Received {message_count} messages | queue={self._queue.qsize()} | last_stage={self.last_stage} | reconnect_requested={self._reconnect_requested}"
+                f"Receive loop ended. Received {message_count} messages | queue={self._queue.qsize()} | inflight={self._inflight_messages} | last_stage={self.last_stage} | reconnect_requested={self._reconnect_requested}"
             )
 
     async def _reconnect_loop(self) -> None:
@@ -451,8 +463,13 @@ class PumpListener:
             "last_progress_at": self.last_progress_at,
             "last_stage": self.last_stage,
             "last_message_preview": self.last_message_preview,
+            "last_ws_recv_at": self.last_ws_recv_at,
+            "last_queue_put_at": self.last_queue_put_at,
+            "last_queue_get_at": self.last_queue_get_at,
+            "last_emit_at": self.last_emit_at,
             "reconnect_requested": self._reconnect_requested,
             "queue_size": self._queue.qsize(),
             "queue_maxsize": self.queue_maxsize,
             "parser_workers": self.parser_workers,
+            "inflight_messages": self._inflight_messages,
         }
