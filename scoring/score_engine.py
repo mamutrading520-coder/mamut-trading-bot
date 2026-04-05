@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Dict, Any
+import re
+from typing import Dict, Any, Tuple, List
 from datetime import datetime
 
 from monitoring.logger import setup_logger
@@ -13,6 +14,34 @@ logger = setup_logger("ScoreEngine")
 
 class ScoreEngine:
     """Computes final token score after trash filtering."""
+
+    _BARE_DOMAIN_RE = re.compile(
+        r"\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:com|io|fun|xyz|ai|app|net|org|gg|co)\b",
+        re.IGNORECASE,
+    )
+    _PURE_MATH_STATEMENT_RE = re.compile(r"^\s*\d+(?:\s*[+\-*/xX]\s*\d+)+(?:\s*=\s*\d+)?\s*$")
+    _OFFICIAL_PREFIX_RE = re.compile(r"^\s*official\b", re.IGNORECASE)
+    _HELP_BAIT_RE = re.compile(
+        r"\b(?:lets?\s+help|help\s+this|single\s+mother|his\s+bday|her\s+bday|w\s+frontrun|with\s+frontrun|front\s*run)\b",
+        re.IGNORECASE,
+    )
+    _TEMPORAL_CONTEXT_RE = re.compile(
+        r"^(?:life\s+when|back\s+when|remember\s+when)\b|\bwhen\b.+\bwas\b",
+        re.IGNORECASE,
+    )
+    _PROMOTIONAL_PHRASE_RE = re.compile(
+        r"\b(?:same\s+dev(?:eloper)?\s+as|same\s+team\s+as|btw\s+check|check\s+(?:this|it|ca)|official\s+ca|contract\s+below|he\s+shilled|she\s+shilled|they\s+shilled|went\s+\d+(?:k|m|x)?)\b",
+        re.IGNORECASE,
+    )
+    _STATEMENT_SUBJECT_RE = re.compile(
+        r"^(?:men|women|boys|girls|guys|people|they|we|you|i|he|she|it|bro|bros|devs?)\b",
+        re.IGNORECASE,
+    )
+    _STATEMENT_LINKER_RE = re.compile(
+        r"\b(?:cant|can't|cannot|can|dont|don't|do|does|did|is|are|was|were|be|need|needs|like|love|hate|deserve|deserves|should|shouldn't|must|will|wont|won't)\b",
+        re.IGNORECASE,
+    )
+    _WORD_TOKEN_RE = re.compile(r"[A-Za-zÀ-ÿ0-9']+")
 
     def __init__(self):
         self.event_bus = get_event_bus()
@@ -26,6 +55,62 @@ class ScoreEngine:
             return float(value)
         except (TypeError, ValueError):
             return default
+
+    def _normalize_text(self, value: Any) -> str:
+        return str(value or "").replace("\n", " ").replace("\r", " ").strip()
+
+    def _semantic_metadata_penalty(self, token_data: Dict[str, Any]) -> Tuple[float, List[str]]:
+        name = self._normalize_text(token_data.get("name"))
+        if not name:
+            return 0.0, []
+
+        lowered = name.lower()
+        tokens = self._WORD_TOKEN_RE.findall(name)
+        lowercase_ratio = sum(1 for ch in name if ch.islower()) / max(sum(1 for ch in name if ch.isalpha()), 1)
+
+        severity = 0.0
+        notes: List[str] = []
+
+        if self._OFFICIAL_PREFIX_RE.match(name) and len(tokens) >= 2:
+            severity = max(severity, 0.80)
+            notes.append("OFFICIAL-prefixed name")
+
+        if self._BARE_DOMAIN_RE.search(name):
+            severity = max(severity, 0.85)
+            notes.append("Bare domain in name")
+
+        if self._HELP_BAIT_RE.search(name):
+            severity = max(severity, 0.90)
+            notes.append("Help-bait / CTA name")
+
+        if self._PURE_MATH_STATEMENT_RE.fullmatch(name):
+            severity = max(severity, 0.85)
+            notes.append("Math-statement name")
+
+        if self._TEMPORAL_CONTEXT_RE.search(name) and len(tokens) >= 3:
+            severity = max(severity, 0.65)
+            notes.append("Temporal/comparative phrase")
+
+        if self._PROMOTIONAL_PHRASE_RE.search(name):
+            severity = max(severity, 0.75)
+            notes.append("Promotional/narrative phrase")
+
+        if (
+            self._STATEMENT_SUBJECT_RE.match(name)
+            and self._STATEMENT_LINKER_RE.search(name)
+            and len(tokens) >= 3
+            and lowercase_ratio >= 0.80
+        ):
+            severity = max(severity, 0.70)
+            notes.append("Statement-like human phrase")
+
+        if severity >= 0.85:
+            return 18.0, notes
+        if severity >= 0.70:
+            return 12.0, notes
+        if severity >= 0.50:
+            return 7.0, notes
+        return 0.0, []
 
     def _compute_quality_score(self, token_data: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -125,6 +210,12 @@ class ScoreEngine:
         elif honeypot_risk >= 60:
             score -= 4
 
+        semantic_penalty, semantic_notes = self._semantic_metadata_penalty(token_data)
+        if semantic_penalty > 0:
+            score -= semantic_penalty
+            notes.append(f"Semantic metadata penalty -{semantic_penalty:.0f}")
+            notes.extend(semantic_notes)
+
         final_score = round(max(0.0, min(100.0, score)), 2)
 
         # Confidence: mezcla de score, limpieza y completitud de datos
@@ -159,12 +250,10 @@ class ScoreEngine:
                 "honeypot_risk": honeypot_risk,
                 "metadata_retrieved": metadata_retrieved,
                 "metadata_present": metadata_present,
+                "semantic_penalty": semantic_penalty,
                 "notes": notes,
             },
         }
-       
-       
-        
 
     async def score_and_emit(self, event: Event) -> bool:
         """Score token and emit ScoreCalculated."""
