@@ -54,6 +54,16 @@ class DiscoveryDeduper:
             return ""
         return creator
 
+    @staticmethod
+    def _display_label(payload: Dict[str, Any]) -> str:
+        symbol = str(payload.get("symbol") or "").strip()
+        if symbol:
+            return symbol
+        name = str(payload.get("name") or "").strip()
+        if name:
+            return name
+        return "UNKNOWN"
+
     def _normalize_initial_sol_bucket(self, value: Any) -> Optional[str]:
         try:
             initial_sol = float(value or 0.0)
@@ -106,11 +116,15 @@ class DiscoveryDeduper:
         activity = self._cleanup_creator_activity(creator, current_time)
         if len(activity) >= self.creator_burst_max_unique:
             latest = activity[-1]
-            latest_symbol = latest.get("symbol") or "UNKNOWN"
+            previous_label = self._display_label(latest)
+            current_label = self._display_label(token_data)
             elapsed = int(current_time - float(latest.get("timestamp", current_time)))
             self.duplicate_count += 1
             self.creator_burst_skips += 1
-            return True, f"creator_burst:{latest_symbol}:{elapsed}s"
+            return True, (
+                "creator_burst_recent_launch:"
+                f"current={current_label}:previous={previous_label}:elapsed={elapsed}s"
+            )
 
         return False, None
 
