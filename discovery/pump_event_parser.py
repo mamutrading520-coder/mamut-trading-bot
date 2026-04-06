@@ -274,9 +274,15 @@ class PumpEventParser:
         normalized = value.strip()
         words = self._tokenize_words(normalized)
         word_count = len(words)
+        lowered_words = [word.lower() for word in words]
+        function_hits = sum(1 for word in lowered_words if word in self._FUNCTION_WORDS)
+        all_caps_words = sum(1 for word in words if len(word) > 1 and word.upper() == word)
 
         if word_count > 5:
             return "overlong phrase-like name"
+
+        if word_count >= 4 and all_caps_words >= 3 and function_hits <= 1:
+            return "all-caps inflated branding phrase"
 
         if self._SEMANTIC_PROMO_RE.search(normalized) or self._SEMANTIC_COMMUNITY_TIME_RE.search(normalized):
             return "promotional/community slogan"

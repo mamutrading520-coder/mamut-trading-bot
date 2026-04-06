@@ -38,21 +38,14 @@ class ScoreEngine:
             "narrative_clause",
             "weak_lead_phrase",
             "linking_verb_structure",
+            "inflated_all_caps_phrase",
         }
         severe_hits = [flag for flag in semantic_flags if flag in severe_flags]
         if not severe_hits:
             return 0.0
-
-        return min(14.0, 8.0 + max(0, len(severe_hits) - 1) * 2.0)
+        return min(16.0, 8.0 + max(0, len(severe_hits) - 1) * 2.0)
 
     def _compute_quality_score(self, token_data: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Build final score from early-stage quality signals and residual risk.
-        Returns:
-        - final_score: 0..100
-        - confidence: 0..1
-        - breakdown
-        """
         market_cap_sol = self._safe_float(token_data.get("market_cap_sol", 0))
         metadata_score = max(0.0, min(100.0, self._safe_float(token_data.get("metadata_score", 0))))
         social_count = int(token_data.get("social_count", 0) or 0)
@@ -123,10 +116,14 @@ class ScoreEngine:
             score -= 4
             notes.append("Borderline semantic contamination")
 
-        severe_narrative_flags = {"narrative_clause", "weak_lead_phrase", "sentence_like_name", "linking_verb_structure"}
+        severe_narrative_flags = {"narrative_clause", "weak_lead_phrase", "sentence_like_name", "linking_verb_structure", "inflated_all_caps_phrase"}
         if any(flag in severe_narrative_flags for flag in semantic_flags):
+            score -= 12
+            notes.append("Narrative/statement-style or inflated naming detected")
+
+        if "multiword_name" in semantic_flags and "all_caps_claim" in semantic_flags:
             score -= 10
-            notes.append("Narrative/statement-style naming detected")
+            notes.append("Inflated multiword all-caps naming pattern")
 
         score -= self._semantic_flag_penalty(semantic_flags)
         if semantic_flags:
@@ -137,25 +134,21 @@ class ScoreEngine:
             notes.append("High authority risk")
         elif authority_risk >= 60:
             score -= 3
-
         if creator_risk >= 80:
             score -= 5
             notes.append("High creator risk")
         elif creator_risk >= 60:
             score -= 2
-
         if concentration_risk >= 85:
             score -= 5
             notes.append("High concentration risk")
         elif concentration_risk >= 65:
             score -= 2
-
         if metadata_risk >= 85 and metadata_retrieved:
             score -= 5
             notes.append("High metadata risk")
         elif metadata_risk >= 65 and metadata_retrieved:
             score -= 2
-
         if honeypot_risk >= 80:
             score -= 8
             notes.append("High honeypot risk")
@@ -191,6 +184,8 @@ class ScoreEngine:
             confidence -= 0.03
 
         if any(flag in severe_narrative_flags for flag in semantic_flags):
+            confidence -= 0.10
+        if "multiword_name" in semantic_flags and "all_caps_claim" in semantic_flags:
             confidence -= 0.08
 
         confidence = round(max(0.0, min(0.99, confidence)), 4)
@@ -217,7 +212,6 @@ class ScoreEngine:
         }
 
     async def score_and_emit(self, event: Event) -> bool:
-        """Score token and emit ScoreCalculated."""
         try:
             token_data = event.data or {}
             mint = token_data.get("mint")
@@ -226,28 +220,16 @@ class ScoreEngine:
                 return False
 
             result = self._compute_quality_score(token_data)
-
             score_event = Event(
                 event_type="ScoreCalculated",
-                data={
-                    **token_data,
-                    "final_score": result["final_score"],
-                    "confidence": result["confidence"],
-                    "score_breakdown": result["breakdown"],
-                },
+                data={**token_data, "final_score": result["final_score"], "confidence": result["confidence"], "score_breakdown": result["breakdown"]},
                 source="ScoreEngine",
                 timestamp=datetime.utcnow(),
             )
-
             await self.event_bus.emit(score_event)
-
             self.scored_count += 1
-            logger.info(
-                f"ScoreCalculated: {mint[:8]}... | "
-                f"score={result['final_score']:.2f} | conf={result['confidence']:.2f}"
-            )
+            logger.info(f"ScoreCalculated: {mint[:8]}... | score={result['final_score']:.2f} | conf={result['confidence']:.2f}")
             return True
-
         except Exception as e:
             logger.error(f"Error scoring token: {e}")
             self.failed_count += 1
@@ -255,8 +237,4 @@ class ScoreEngine:
 
     def get_stats(self) -> Dict[str, Any]:
         total = self.scored_count + self.failed_count
-        return {
-            "scored_count": self.scored_count,
-            "failed_count": self.failed_count,
-            "success_rate": self.scored_count / total if total > 0 else 0,
-        }
+        return {"scored_count": self.scored_count, "failed_count": self.failed_count, "success_rate": self.scored_count / total if total > 0 else 0}
