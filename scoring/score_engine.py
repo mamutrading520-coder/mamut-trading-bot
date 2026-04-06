@@ -1,4 +1,4 @@
-"""Score engine for passed tokens"""
+"""Score engine for passed tokens."""
 
 from __future__ import annotations
 
@@ -39,17 +39,21 @@ class ScoreEngine:
             "weak_lead_phrase",
             "linking_verb_structure",
             "inflated_all_caps_phrase",
+            "routing_context_phrase",
+            "deictic_generic_construct",
+            "numeric_generic_construct",
+            "generic_context_construct",
+            "low_identity_short_name",
         }
         severe_hits = [flag for flag in semantic_flags if flag in severe_flags]
         if not severe_hits:
             return 0.0
-        return min(16.0, 8.0 + max(0, len(severe_hits) - 1) * 2.0)
+        return min(18.0, 9.0 + max(0, len(severe_hits) - 1) * 2.0)
 
     def _compute_quality_score(self, token_data: Dict[str, Any]) -> Dict[str, Any]:
         market_cap_sol = self._safe_float(token_data.get("market_cap_sol", 0))
         metadata_score = max(0.0, min(100.0, self._safe_float(token_data.get("metadata_score", 0))))
         social_count = int(token_data.get("social_count", 0) or 0)
-
         aggregate_risk = self._safe_float(token_data.get("aggregate_risk_score", 35))
         authority_risk = self._safe_float(token_data.get("authority_risk", 40))
         creator_risk = self._safe_float(token_data.get("creator_risk", 45))
@@ -58,12 +62,11 @@ class ScoreEngine:
         honeypot_risk = self._safe_float(token_data.get("honeypot_risk", 30))
         semantic_risk = self._safe_float(token_data.get("semantic_risk", 15))
         semantic_flags = list(token_data.get("semantic_risk_flags", []) or [])
-
         metadata_retrieved = bool(token_data.get("metadata_retrieved", False))
         metadata_present = bool(token_data.get("metadata_json") or token_data.get("uri_metadata"))
 
         score = 62.0
-        notes = []
+        notes: List[str] = []
 
         if not metadata_retrieved and not metadata_present:
             notes.append("Metadata pending")
@@ -101,25 +104,38 @@ class ScoreEngine:
             score -= 3
             notes.append("Late/extended market cap profile")
 
-        score -= aggregate_risk * 0.38
+        score -= aggregate_risk * 0.40
 
         if semantic_risk >= 80:
-            score -= 18
+            score -= 20
             notes.append("Critical semantic contamination")
         elif semantic_risk >= 65:
-            score -= 12
+            score -= 14
             notes.append("High semantic contamination")
         elif semantic_risk >= 50:
-            score -= 7
-            notes.append("Narrative or weak token-brand semantics")
+            score -= 9
+            notes.append("Weak token-brand semantics")
         elif semantic_risk >= 35:
-            score -= 4
+            score -= 5
             notes.append("Borderline semantic contamination")
+        elif semantic_risk >= 25:
+            score -= 3
 
-        severe_narrative_flags = {"narrative_clause", "weak_lead_phrase", "sentence_like_name", "linking_verb_structure", "inflated_all_caps_phrase"}
-        if any(flag in severe_narrative_flags for flag in semantic_flags):
-            score -= 12
-            notes.append("Narrative/statement-style or inflated naming detected")
+        hard_weak_name_flags = {
+            "routing_context_phrase",
+            "deictic_generic_construct",
+            "numeric_generic_construct",
+            "generic_context_construct",
+            "low_identity_short_name",
+        }
+        medium_weak_name_flags = {"context_heavy_short_name", "inflated_all_caps_phrase", "sentence_like_name", "weak_lead_phrase"}
+
+        if any(flag in hard_weak_name_flags for flag in semantic_flags):
+            score -= 16
+            notes.append("Weak short-name semantic class detected")
+        elif any(flag in medium_weak_name_flags for flag in semantic_flags):
+            score -= 10
+            notes.append("Weak semantic naming pattern detected")
 
         if "multiword_name" in semantic_flags and "all_caps_claim" in semantic_flags:
             score -= 10
@@ -127,7 +143,7 @@ class ScoreEngine:
 
         score -= self._semantic_flag_penalty(semantic_flags)
         if semantic_flags:
-            notes.append(f"Semantic flags: {', '.join(semantic_flags[:4])}")
+            notes.append(f"Semantic flags: {', '.join(semantic_flags[:5])}")
 
         if authority_risk >= 80:
             score -= 6
@@ -182,13 +198,30 @@ class ScoreEngine:
             confidence -= 0.05
         elif semantic_risk >= 35:
             confidence -= 0.03
+        elif semantic_risk >= 25:
+            confidence -= 0.02
 
-        if any(flag in severe_narrative_flags for flag in semantic_flags):
-            confidence -= 0.10
+        if any(flag in hard_weak_name_flags for flag in semantic_flags):
+            confidence -= 0.12
+        elif any(flag in medium_weak_name_flags for flag in semantic_flags):
+            confidence -= 0.08
         if "multiword_name" in semantic_flags and "all_caps_claim" in semantic_flags:
             confidence -= 0.08
 
+        early_gate_applied = False
+        if any(flag in hard_weak_name_flags for flag in semantic_flags):
+            final_score = min(final_score, 59.0)
+            confidence = min(confidence, 0.64)
+            early_gate_applied = True
+            notes.append("Semantic early-signal gate applied")
+        elif semantic_risk >= 32 and any(flag in medium_weak_name_flags for flag in semantic_flags):
+            final_score = min(final_score, 59.0)
+            confidence = min(confidence, 0.64)
+            early_gate_applied = True
+            notes.append("Borderline semantic early-signal gate applied")
+
         confidence = round(max(0.0, min(0.99, confidence)), 4)
+        final_score = round(max(0.0, min(100.0, final_score)), 2)
 
         return {
             "final_score": final_score,
@@ -207,6 +240,7 @@ class ScoreEngine:
                 "semantic_flags": semantic_flags,
                 "metadata_retrieved": metadata_retrieved,
                 "metadata_present": metadata_present,
+                "semantic_early_gate_applied": early_gate_applied,
                 "notes": notes,
             },
         }
@@ -218,7 +252,6 @@ class ScoreEngine:
             if not mint:
                 logger.warning("score_and_emit called without mint")
                 return False
-
             result = self._compute_quality_score(token_data)
             score_event = Event(
                 event_type="ScoreCalculated",
