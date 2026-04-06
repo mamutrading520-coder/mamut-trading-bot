@@ -30,6 +30,7 @@ class TrashFilterEngine:
     _MULTISPACE_RE = re.compile(r"\s+")
     _WORD_RE = re.compile(r"[A-Za-z0-9]+(?:['-][A-Za-z0-9]+)?")
     _NUMERICISH_RE = re.compile(r"^(?:(?:19|20)\d{2}|\d+[a-z]{0,3})$", re.IGNORECASE)
+    _NON_ALPHA_RE = re.compile(r"[^A-Za-z]+")
 
     _SEMANTIC_IMPERATIVE_RE = re.compile(r"^\s*(?:join|buy|sell|open|claim|click|follow|watch|check|visit|send|ape|pump|moon|hold|make|create|generate|show|turn|put|draw|render|write)\b", re.IGNORECASE)
     _SEMANTIC_PROMO_RE = re.compile(r"\b(?:most|best|biggest|strongest|bullish|viral|official|guaranteed|unstoppable|massive|epic|legendary|ultimate|alpha)\b.*\b(?:community|army|movement|launch|token|coin|memecoin|pump|run|holders|weeks?|days?|today|now|ever)\b", re.IGNORECASE)
@@ -58,6 +59,9 @@ class TrashFilterEngine:
     _SEMANTIC_TITLE_CONNECTORS = {"with", "of", "from", "about"}
     _SEMANTIC_ROLE_CLAIM_WORDS = {"agent", "groomer", "king", "queen", "hero", "boss", "guru", "dev", "doctor", "hunter", "warrior", "president", "ceo"}
     _SEMANTIC_ARTICLE_WORDS = {"a", "an", "the"}
+
+    _SEMANTIC_GENERIC_PREFIX_WORDS = {"project", "official", "real", "true", "pure", "meta", "super", "ultra", "crypto", "the"}
+    _SEMANTIC_ASPIRATIONAL_WORDS = {"wealth", "money", "fortune", "profit", "profits", "gains", "freedom", "success", "power", "rich", "riches", "luxury", "glory", "victory", "prosperity"}
 
     def __init__(self, store: SQLiteStore, settings: Settings):
         self.store = store
@@ -102,6 +106,13 @@ class TrashFilterEngine:
     def _is_numericish(self, word: str) -> bool:
         return bool(self._NUMERICISH_RE.fullmatch(word or ""))
 
+    def _normalized_alpha_view(self, value: str) -> str:
+        return self._NON_ALPHA_RE.sub(" ", value or " ").strip().lower()
+
+    def _contains_profane_lexeme(self, value: str) -> bool:
+        alpha_view = self._normalized_alpha_view(value)
+        return bool(alpha_view and self._SEMANTIC_PROFANITY_RE.search(alpha_view))
+
     def _analyze_name_profile(self, words: List[str]) -> Dict[str, bool]:
         lowered_words = [word.lower() for word in words]
         content_words = [word for word in lowered_words if word not in self._SEMANTIC_FUNCTION_WORDS]
@@ -113,6 +124,8 @@ class TrashFilterEngine:
         numeric_hits = sum(1 for word in content_words if self._is_numericish(word))
         weak_hits = sum(1 for word in content_words if word in weak_pool or self._is_numericish(word))
         content_count = len(content_words)
+        prefix_hits = sum(1 for word in content_words if word in self._SEMANTIC_GENERIC_PREFIX_WORDS)
+        aspirational_hits = sum(1 for word in content_words if word in self._SEMANTIC_ASPIRATIONAL_WORDS)
 
         starts_weak = bool(lowered_words and lowered_words[0] in self._SEMANTIC_WEAK_STARTERS)
         has_linking_verb = any(word in self._SEMANTIC_LINKING_VERBS for word in lowered_words[1:])
@@ -131,6 +144,7 @@ class TrashFilterEngine:
                 role_claim_phrase = True
                 break
 
+        first_content = content_words[0] if content_words else ""
         return {
             "routing_phrase": len(words) <= 3 and routing_hits >= 1 and (context_hits >= 2 or "ca" in content_words),
             "deictic_generic_construct": len(words) <= 3 and deictic_hits >= 1 and generic_hits >= 1,
@@ -142,6 +156,8 @@ class TrashFilterEngine:
             "announcement_phrase": len(words) >= 3 and announcement_hits >= 1 and (status_hits >= 1 or has_linking_verb or status_subject_hits >= 1),
             "title_like_narrative": len(words) >= 3 and has_title_word and has_title_connector,
             "role_claim_phrase": len(words) >= 3 and role_claim_phrase,
+            "generic_prefix_branding": len(words) <= 3 and content_count >= 2 and first_content in self._SEMANTIC_GENERIC_PREFIX_WORDS and prefix_hits >= 1,
+            "aspirational_generic_branding": len(words) <= 3 and content_count >= 2 and aspirational_hits >= 1 and aspirational_hits + generic_hits + prefix_hits >= content_count,
         }
 
     def _creator_history_thresholds(self) -> Dict[str, int]:
@@ -438,6 +454,16 @@ class TrashFilterEngine:
                 reasons.append("Nombre corto combina léxico genérico con contexto promocional")
                 flags.append("generic_context_construct")
                 hard_reject = True
+            if profile["generic_prefix_branding"]:
+                risk_score += 34.0
+                reasons.append("Nombre usa prefijo genérico como branding principal")
+                flags.append("generic_prefix_branding")
+                hard_reject = True
+            if profile["aspirational_generic_branding"]:
+                risk_score += 34.0
+                reasons.append("Nombre usa branding aspiracional/genérico sin identidad propia")
+                flags.append("aspirational_generic_branding")
+                hard_reject = True
             if profile["all_content_weak"]:
                 risk_score += 34.0
                 reasons.append("Nombre corto de baja identidad, compuesto solo por léxico débil")
@@ -483,10 +509,15 @@ class TrashFilterEngine:
                 reasons.append("Nombre con semántica promocional o slogan narrativo")
                 flags.append("promo_slogan")
                 hard_reject = True
-            if self._SEMANTIC_PROFANITY_RE.search(name) and word_count >= 2:
+            if self._contains_profane_lexeme(name) and word_count >= 2:
                 risk_score += 30.0
                 reasons.append("Nombre agresivo o profano impropio de branding serio")
                 flags.append("profane_phrase")
+                hard_reject = True
+            if self._contains_profane_lexeme(symbol):
+                risk_score += 38.0
+                reasons.append("Símbolo contiene semántica profana o degradada")
+                flags.append("profane_symbol")
                 hard_reject = True
             if narrative_clause:
                 risk_score += 38.0

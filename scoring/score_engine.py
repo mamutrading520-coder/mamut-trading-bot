@@ -32,6 +32,7 @@ class ScoreEngine:
             "cta_phrase",
             "promo_slogan",
             "profane_phrase",
+            "profane_symbol",
             "sentence_like_name",
             "overlong_phrase",
             "generic_placeholder_symbol",
@@ -48,11 +49,13 @@ class ScoreEngine:
             "announcement_phrase",
             "title_like_narrative_phrase",
             "role_claim_phrase",
+            "generic_prefix_branding",
+            "aspirational_generic_branding",
         }
         severe_hits = [flag for flag in semantic_flags if flag in severe_flags]
         if not severe_hits:
             return 0.0
-        return min(20.0, 9.0 + max(0, len(severe_hits) - 1) * 2.0)
+        return min(22.0, 10.0 + max(0, len(severe_hits) - 1) * 2.0)
 
     def _compute_quality_score(self, token_data: Dict[str, Any]) -> Dict[str, Any]:
         market_cap_sol = self._safe_float(token_data.get("market_cap_sol", 0))
@@ -135,6 +138,9 @@ class ScoreEngine:
             "announcement_phrase",
             "title_like_narrative_phrase",
             "role_claim_phrase",
+            "generic_prefix_branding",
+            "aspirational_generic_branding",
+            "profane_symbol",
         }
         medium_weak_name_flags = {
             "context_heavy_short_name",
@@ -145,7 +151,7 @@ class ScoreEngine:
         }
 
         if any(flag in hard_weak_name_flags for flag in semantic_flags):
-            score -= 18
+            score -= 20
             notes.append("Hard semantic weak-name class detected")
         elif any(flag in medium_weak_name_flags for flag in semantic_flags):
             score -= 10
@@ -157,7 +163,7 @@ class ScoreEngine:
 
         score -= self._semantic_flag_penalty(semantic_flags)
         if semantic_flags:
-            notes.append(f"Semantic flags: {', '.join(semantic_flags[:5])}")
+            notes.append(f"Semantic flags: {', '.join(semantic_flags[:6])}")
 
         if authority_risk >= 80:
             score -= 6
@@ -216,7 +222,7 @@ class ScoreEngine:
             confidence -= 0.02
 
         if any(flag in hard_weak_name_flags for flag in semantic_flags):
-            confidence -= 0.13
+            confidence -= 0.14
         elif any(flag in medium_weak_name_flags for flag in semantic_flags):
             confidence -= 0.08
         if "multiword_name" in semantic_flags and "all_caps_claim" in semantic_flags:

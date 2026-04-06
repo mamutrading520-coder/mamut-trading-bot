@@ -55,6 +55,7 @@ class PumpEventParser:
     _MULTISPACE_RE = re.compile(r"\s+")
     _WORD_RE = re.compile(r"[A-Za-z0-9]+(?:['-][A-Za-z0-9]+)?")
     _NUMERICISH_RE = re.compile(r"^(?:(?:19|20)\d{2}|\d+[a-z]{0,3})$", re.IGNORECASE)
+    _NON_ALPHA_RE = re.compile(r"[^A-Za-z]+")
 
     _URL_LIKE_RE = re.compile(r"(?:https?://|www\.|t\.me/|discord(?:\.gg|app\.com/))", re.IGNORECASE)
     _MENTION_RE = re.compile(r"(?:@everyone|@here|<@&?|^@[A-Za-z0-9_]+$)", re.IGNORECASE)
@@ -93,6 +94,9 @@ class PumpEventParser:
     _TITLE_CONNECTORS = {"with", "of", "from", "about"}
     _ROLE_CLAIM_WORDS = {"agent", "groomer", "king", "queen", "hero", "boss", "guru", "dev", "doctor", "hunter", "warrior", "president", "ceo"}
     _ARTICLE_WORDS = {"a", "an", "the"}
+
+    _GENERIC_PREFIX_WORDS = {"project", "official", "real", "true", "pure", "meta", "super", "ultra", "crypto", "the"}
+    _ASPIRATIONAL_WORDS = {"wealth", "money", "fortune", "profit", "profits", "gains", "freedom", "success", "power", "rich", "riches", "luxury", "glory", "victory", "prosperity"}
 
     def parse(self, data: Dict[str, Any]) -> Optional[ParsedTokenEvent]:
         try:
@@ -184,6 +188,13 @@ class PumpEventParser:
     def _is_numericish(self, word: str) -> bool:
         return bool(self._NUMERICISH_RE.fullmatch(word or ""))
 
+    def _normalized_alpha_view(self, value: str) -> str:
+        return self._NON_ALPHA_RE.sub(" ", value or " ").strip().lower()
+
+    def _contains_profane_lexeme(self, value: str) -> bool:
+        alpha_view = self._normalized_alpha_view(value)
+        return bool(alpha_view and self._PROFANITY_RE.search(alpha_view))
+
     def _analyze_name_profile(self, words: List[str]) -> Dict[str, bool]:
         lowered_words = [word.lower() for word in words]
         content_words = [word for word in lowered_words if word not in self._FUNCTION_WORDS]
@@ -203,6 +214,8 @@ class PumpEventParser:
         announcement_hits = sum(1 for word in lowered_words if word in self._ANNOUNCEMENT_ACTION_WORDS)
         has_title_word = any(word in self._TITLE_WORDS for word in lowered_words)
         has_title_connector = any(word in self._TITLE_CONNECTORS for word in lowered_words)
+        prefix_hits = sum(1 for word in content_words if word in self._GENERIC_PREFIX_WORDS)
+        aspirational_hits = sum(1 for word in content_words if word in self._ASPIRATIONAL_WORDS)
 
         role_claim_phrase = False
         for idx, word in enumerate(lowered_words):
@@ -213,6 +226,7 @@ class PumpEventParser:
                 role_claim_phrase = True
                 break
 
+        first_content = content_words[0] if content_words else ""
         return {
             "routing_phrase": len(words) <= 3 and routing_hits >= 1 and (context_hits >= 2 or "ca" in content_words),
             "deictic_generic_construct": len(words) <= 3 and deictic_hits >= 1 and generic_hits >= 1,
@@ -224,6 +238,8 @@ class PumpEventParser:
             "announcement_phrase": len(words) >= 3 and announcement_hits >= 1 and (status_hits >= 1 or has_linking_verb or status_subject_hits >= 1),
             "title_like_narrative": len(words) >= 3 and has_title_word and has_title_connector,
             "role_claim_phrase": len(words) >= 3 and role_claim_phrase,
+            "generic_prefix_branding": len(words) <= 3 and content_count >= 2 and first_content in self._GENERIC_PREFIX_WORDS and prefix_hits >= 1,
+            "aspirational_generic_branding": len(words) <= 3 and content_count >= 2 and aspirational_hits >= 1 and aspirational_hits + generic_hits + prefix_hits >= content_count,
         }
 
     def _get_name_rejection_reason(self, value: str) -> Optional[str]:
@@ -266,6 +282,8 @@ class PumpEventParser:
             return "invalid symbol format"
         if self._GENERIC_ACTION_SYMBOL_RE.fullmatch(value):
             return "generic action/promotional symbol"
+        if self._contains_profane_lexeme(value):
+            return "profane/low-grade symbol"
         return None
 
     def _get_semantic_name_rejection_reason(self, value: str) -> Optional[str]:
@@ -287,6 +305,10 @@ class PumpEventParser:
             return "numeric generic phrase"
         if profile["generic_context_construct"]:
             return "generic context phrase"
+        if profile["generic_prefix_branding"]:
+            return "generic prefix branding phrase"
+        if profile["aspirational_generic_branding"]:
+            return "aspirational/generic branding phrase"
         if profile["all_content_weak"]:
             return "low-identity weak phrase"
         if profile["status_update_phrase"]:
@@ -303,7 +325,7 @@ class PumpEventParser:
             return "promotional/community slogan"
         if self._SEMANTIC_CTA_PREFIX_RE.match(normalized) and word_count >= 2:
             return "imperative/cta phrase"
-        if self._PROFANITY_RE.search(normalized) and word_count >= 2:
+        if self._contains_profane_lexeme(normalized) and word_count >= 2:
             return "aggressive/profane phrase"
         if self._looks_like_sentence_name(words, normalized):
             return "sentence-like/common phrase"
