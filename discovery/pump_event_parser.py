@@ -1,9 +1,9 @@
-"""Parser for Pump.fun token events"""
+"""Parser for Pump.fun token events."""
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Optional, Dict, Any, List
+from typing import Any, Dict, List, Optional
 
 from config.thresholds import TOKEN_METADATA_THRESHOLDS
 from monitoring.logger import setup_logger
@@ -13,7 +13,6 @@ logger = setup_logger("PumpEventParser")
 
 @dataclass
 class ParsedTokenEvent:
-    """Parsed token event data"""
     mint: str
     name: str
     symbol: str
@@ -50,7 +49,7 @@ class ParsedTokenEvent:
 
 
 class PumpEventParser:
-    """Parses Pump.fun WebSocket events"""
+    """Parses Pump.fun WebSocket events."""
 
     _CONTROL_CHARS_RE = re.compile(r"[\x00-\x1F\x7F]")
     _MULTISPACE_RE = re.compile(r"\s+")
@@ -86,6 +85,14 @@ class PumpEventParser:
     _ROUTING_WORDS = {"ca", "bio", "link", "website", "site", "telegram", "discord", "twitter", "tiktok", "instagram", "insta", "ig", "x"}
     _CONTEXT_WORDS = {"ca", "bio", "coin", "token", "launch", "live", "website", "site", "telegram", "discord", "twitter", "tiktok", "dex", "paid", "official", "community", "pump", "moon", "cto", "alpha", "trend", "viral"}
     _GENERIC_NAME_WORDS = {"coin", "token", "wif", "inu", "meme", "memecoin", "sol", "cap"}
+
+    _STATUS_WORDS = {"suspended", "banned", "paused", "delayed", "live", "online", "offline", "out", "listed", "open", "closed", "updated", "broken", "restored", "available", "ready"}
+    _STATUS_SUBJECT_WORDS = {"account", "bundle", "launch", "listing", "website", "site", "server", "dex", "update", "news", "market", "channel", "bio", "link"}
+    _ANNOUNCEMENT_ACTION_WORDS = {"read", "watch", "listen", "check", "join", "follow", "see", "now", "alert", "update", "news", "breaking"}
+    _TITLE_WORDS = {"life", "story", "tale", "diary", "chronicles", "adventures", "journey", "memoirs", "account", "legend", "days", "nights"}
+    _TITLE_CONNECTORS = {"with", "of", "from", "about"}
+    _ROLE_CLAIM_WORDS = {"agent", "groomer", "king", "queen", "hero", "boss", "guru", "dev", "doctor", "hunter", "warrior", "president", "ceo"}
+    _ARTICLE_WORDS = {"a", "an", "the"}
 
     def parse(self, data: Dict[str, Any]) -> Optional[ParsedTokenEvent]:
         try:
@@ -163,6 +170,62 @@ class PumpEventParser:
         text = self._MULTISPACE_RE.sub(" ", text).strip()
         return text
 
+    def _passes_length(self, value: str, kind: str) -> bool:
+        if not value or not value.strip():
+            logger.debug(f"Invalid {kind}: empty")
+            return False
+        min_len = TOKEN_METADATA_THRESHOLDS.get(f"min_{kind}_length", 1)
+        max_len = TOKEN_METADATA_THRESHOLDS.get(f"max_{kind}_length", 100)
+        if len(value) < min_len or len(value) > max_len:
+            logger.debug(f"Invalid {kind}: length out of range ({len(value)})")
+            return False
+        return True
+
+    def _is_numericish(self, word: str) -> bool:
+        return bool(self._NUMERICISH_RE.fullmatch(word or ""))
+
+    def _analyze_name_profile(self, words: List[str]) -> Dict[str, bool]:
+        lowered_words = [word.lower() for word in words]
+        content_words = [word for word in lowered_words if word not in self._FUNCTION_WORDS]
+        weak_pool = self._DEICTIC_WORDS | self._ROUTING_WORDS | self._CONTEXT_WORDS | self._GENERIC_NAME_WORDS
+        routing_hits = sum(1 for word in content_words if word in self._ROUTING_WORDS)
+        context_hits = sum(1 for word in content_words if word in self._CONTEXT_WORDS)
+        deictic_hits = sum(1 for word in content_words if word in self._DEICTIC_WORDS)
+        generic_hits = sum(1 for word in content_words if word in self._GENERIC_NAME_WORDS)
+        numeric_hits = sum(1 for word in content_words if self._is_numericish(word))
+        weak_hits = sum(1 for word in content_words if word in weak_pool or self._is_numericish(word))
+        content_count = len(content_words)
+
+        starts_weak = bool(lowered_words and lowered_words[0] in self._WEAK_STARTERS)
+        has_linking_verb = any(word in self._LINKING_VERBS for word in lowered_words[1:])
+        status_hits = sum(1 for word in lowered_words if word in self._STATUS_WORDS)
+        status_subject_hits = sum(1 for word in lowered_words if word in self._STATUS_SUBJECT_WORDS)
+        announcement_hits = sum(1 for word in lowered_words if word in self._ANNOUNCEMENT_ACTION_WORDS)
+        has_title_word = any(word in self._TITLE_WORDS for word in lowered_words)
+        has_title_connector = any(word in self._TITLE_CONNECTORS for word in lowered_words)
+
+        role_claim_phrase = False
+        for idx, word in enumerate(lowered_words):
+            if word not in self._ROLE_CLAIM_WORDS:
+                continue
+            article_before = idx > 0 and lowered_words[idx - 1] in self._ARTICLE_WORDS
+            if article_before or starts_weak or has_linking_verb or any(w in self._DEICTIC_WORDS or w in self._PRONOUN_WORDS for w in lowered_words[:idx]):
+                role_claim_phrase = True
+                break
+
+        return {
+            "routing_phrase": len(words) <= 3 and routing_hits >= 1 and (context_hits >= 2 or "ca" in content_words),
+            "deictic_generic_construct": len(words) <= 3 and deictic_hits >= 1 and generic_hits >= 1,
+            "numeric_generic_construct": len(words) <= 3 and numeric_hits >= 1 and generic_hits >= 1,
+            "generic_context_construct": len(words) <= 3 and generic_hits >= 1 and context_hits >= 1,
+            "all_content_weak": content_count >= 2 and weak_hits == content_count,
+            "context_heavy_phrase": len(words) <= 4 and content_count >= 2 and weak_hits >= max(2, content_count - 1),
+            "status_update_phrase": len(words) <= 4 and status_hits >= 1 and (status_subject_hits >= 1 or has_linking_verb or starts_weak or announcement_hits >= 1),
+            "announcement_phrase": len(words) >= 3 and announcement_hits >= 1 and (status_hits >= 1 or has_linking_verb or status_subject_hits >= 1),
+            "title_like_narrative": len(words) >= 3 and has_title_word and has_title_connector,
+            "role_claim_phrase": len(words) >= 3 and role_claim_phrase,
+        }
+
     def _get_name_rejection_reason(self, value: str) -> Optional[str]:
         if not self._passes_length(value, kind="name"):
             return "length out of range"
@@ -178,11 +241,9 @@ class PumpEventParser:
             return "pair/action expression"
         if self._looks_like_prompt_text(value):
             return "prompt-like text"
-
         semantic_reason = self._get_semantic_name_rejection_reason(value)
         if semantic_reason:
             return semantic_reason
-
         non_alnum_ratio = sum(1 for ch in value if not ch.isalnum() and ch != " ") / max(len(value), 1)
         if len(value) >= 8 and non_alnum_ratio > 0.35:
             return "too many non-alphanumeric characters"
@@ -207,40 +268,6 @@ class PumpEventParser:
             return "generic action/promotional symbol"
         return None
 
-    def _passes_length(self, value: str, kind: str) -> bool:
-        if not value or not value.strip():
-            logger.debug(f"Invalid {kind}: empty")
-            return False
-        min_len = TOKEN_METADATA_THRESHOLDS.get(f"min_{kind}_length", 1)
-        max_len = TOKEN_METADATA_THRESHOLDS.get(f"max_{kind}_length", 100)
-        if len(value) < min_len or len(value) > max_len:
-            logger.debug(f"Invalid {kind}: length out of range ({len(value)})")
-            return False
-        return True
-
-    def _is_numericish(self, word: str) -> bool:
-        return bool(self._NUMERICISH_RE.fullmatch(word or ""))
-
-    def _analyze_short_name_profile(self, words: List[str]) -> Dict[str, Any]:
-        lowered_words = [word.lower() for word in words]
-        content_words = [word for word in lowered_words if word not in self._FUNCTION_WORDS]
-        weak_pool = self._DEICTIC_WORDS | self._ROUTING_WORDS | self._CONTEXT_WORDS | self._GENERIC_NAME_WORDS
-        routing_hits = sum(1 for word in content_words if word in self._ROUTING_WORDS)
-        context_hits = sum(1 for word in content_words if word in self._CONTEXT_WORDS)
-        deictic_hits = sum(1 for word in content_words if word in self._DEICTIC_WORDS)
-        generic_hits = sum(1 for word in content_words if word in self._GENERIC_NAME_WORDS)
-        numeric_hits = sum(1 for word in content_words if self._is_numericish(word))
-        weak_hits = sum(1 for word in content_words if word in weak_pool or self._is_numericish(word))
-        content_count = len(content_words)
-        return {
-            "routing_phrase": len(words) <= 3 and routing_hits >= 1 and (context_hits >= 2 or "ca" in content_words),
-            "deictic_generic_construct": len(words) <= 3 and deictic_hits >= 1 and generic_hits >= 1,
-            "numeric_generic_construct": len(words) <= 3 and numeric_hits >= 1 and generic_hits >= 1,
-            "generic_context_construct": len(words) <= 3 and generic_hits >= 1 and context_hits >= 1,
-            "all_content_weak": content_count >= 2 and weak_hits == content_count,
-            "context_heavy_phrase": len(words) <= 4 and content_count >= 2 and weak_hits >= max(2, content_count - 1),
-        }
-
     def _get_semantic_name_rejection_reason(self, value: str) -> Optional[str]:
         normalized = value.strip()
         words = self._tokenize_words(normalized)
@@ -248,20 +275,28 @@ class PumpEventParser:
         lowered_words = [word.lower() for word in words]
         function_hits = sum(1 for word in lowered_words if word in self._FUNCTION_WORDS)
         all_caps_words = sum(1 for word in words if len(word) > 1 and word.upper() == word)
-        short_profile = self._analyze_short_name_profile(words)
+        profile = self._analyze_name_profile(words)
 
         if word_count > 5:
             return "overlong phrase-like name"
-        if short_profile["routing_phrase"]:
+        if profile["routing_phrase"]:
             return "routing/context phrase"
-        if short_profile["deictic_generic_construct"]:
+        if profile["deictic_generic_construct"]:
             return "deictic generic phrase"
-        if short_profile["numeric_generic_construct"]:
+        if profile["numeric_generic_construct"]:
             return "numeric generic phrase"
-        if short_profile["generic_context_construct"]:
+        if profile["generic_context_construct"]:
             return "generic context phrase"
-        if short_profile["all_content_weak"]:
+        if profile["all_content_weak"]:
             return "low-identity weak phrase"
+        if profile["status_update_phrase"]:
+            return "status/update phrase"
+        if profile["announcement_phrase"]:
+            return "announcement phrase"
+        if profile["title_like_narrative"]:
+            return "title-like narrative phrase"
+        if profile["role_claim_phrase"]:
+            return "role/agent claim phrase"
         if word_count >= 4 and all_caps_words >= 3 and function_hits <= 1:
             return "all-caps inflated branding phrase"
         if self._SEMANTIC_PROMO_RE.search(normalized) or self._SEMANTIC_COMMUNITY_TIME_RE.search(normalized):

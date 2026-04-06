@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Dict, Any, List
+from typing import Any, Dict, List
 from datetime import datetime
 
 from monitoring.logger import setup_logger
@@ -44,11 +44,15 @@ class ScoreEngine:
             "numeric_generic_construct",
             "generic_context_construct",
             "low_identity_short_name",
+            "status_update_phrase",
+            "announcement_phrase",
+            "title_like_narrative_phrase",
+            "role_claim_phrase",
         }
         severe_hits = [flag for flag in semantic_flags if flag in severe_flags]
         if not severe_hits:
             return 0.0
-        return min(18.0, 9.0 + max(0, len(severe_hits) - 1) * 2.0)
+        return min(20.0, 9.0 + max(0, len(severe_hits) - 1) * 2.0)
 
     def _compute_quality_score(self, token_data: Dict[str, Any]) -> Dict[str, Any]:
         market_cap_sol = self._safe_float(token_data.get("market_cap_sol", 0))
@@ -127,12 +131,22 @@ class ScoreEngine:
             "numeric_generic_construct",
             "generic_context_construct",
             "low_identity_short_name",
+            "status_update_phrase",
+            "announcement_phrase",
+            "title_like_narrative_phrase",
+            "role_claim_phrase",
         }
-        medium_weak_name_flags = {"context_heavy_short_name", "inflated_all_caps_phrase", "sentence_like_name", "weak_lead_phrase"}
+        medium_weak_name_flags = {
+            "context_heavy_short_name",
+            "inflated_all_caps_phrase",
+            "sentence_like_name",
+            "weak_lead_phrase",
+            "linking_verb_structure",
+        }
 
         if any(flag in hard_weak_name_flags for flag in semantic_flags):
-            score -= 16
-            notes.append("Weak short-name semantic class detected")
+            score -= 18
+            notes.append("Hard semantic weak-name class detected")
         elif any(flag in medium_weak_name_flags for flag in semantic_flags):
             score -= 10
             notes.append("Weak semantic naming pattern detected")
@@ -202,7 +216,7 @@ class ScoreEngine:
             confidence -= 0.02
 
         if any(flag in hard_weak_name_flags for flag in semantic_flags):
-            confidence -= 0.12
+            confidence -= 0.13
         elif any(flag in medium_weak_name_flags for flag in semantic_flags):
             confidence -= 0.08
         if "multiword_name" in semantic_flags and "all_caps_claim" in semantic_flags:
@@ -214,7 +228,7 @@ class ScoreEngine:
             confidence = min(confidence, 0.64)
             early_gate_applied = True
             notes.append("Semantic early-signal gate applied")
-        elif semantic_risk >= 32 and any(flag in medium_weak_name_flags for flag in semantic_flags):
+        elif semantic_risk >= 30 and any(flag in medium_weak_name_flags for flag in semantic_flags):
             final_score = min(final_score, 59.0)
             confidence = min(confidence, 0.64)
             early_gate_applied = True

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime
 
 from monitoring.logger import setup_logger
@@ -51,6 +51,14 @@ class TrashFilterEngine:
     _SEMANTIC_CONTEXT_WORDS = {"ca", "bio", "coin", "token", "launch", "live", "website", "site", "telegram", "discord", "twitter", "tiktok", "dex", "paid", "official", "community", "pump", "moon", "cto", "alpha", "trend", "viral"}
     _SEMANTIC_GENERIC_NAME_WORDS = {"coin", "token", "wif", "inu", "meme", "memecoin", "sol", "cap"}
 
+    _SEMANTIC_STATUS_WORDS = {"suspended", "banned", "paused", "delayed", "live", "online", "offline", "out", "listed", "open", "closed", "updated", "broken", "restored", "available", "ready"}
+    _SEMANTIC_STATUS_SUBJECT_WORDS = {"account", "bundle", "launch", "listing", "website", "site", "server", "dex", "update", "news", "market", "channel", "bio", "link"}
+    _SEMANTIC_ANNOUNCEMENT_ACTION_WORDS = {"read", "watch", "listen", "check", "join", "follow", "see", "now", "alert", "update", "news", "breaking"}
+    _SEMANTIC_TITLE_WORDS = {"life", "story", "tale", "diary", "chronicles", "adventures", "journey", "memoirs", "account", "legend", "days", "nights"}
+    _SEMANTIC_TITLE_CONNECTORS = {"with", "of", "from", "about"}
+    _SEMANTIC_ROLE_CLAIM_WORDS = {"agent", "groomer", "king", "queen", "hero", "boss", "guru", "dev", "doctor", "hunter", "warrior", "president", "ceo"}
+    _SEMANTIC_ARTICLE_WORDS = {"a", "an", "the"}
+
     def __init__(self, store: SQLiteStore, settings: Settings):
         self.store = store
         self.settings = settings
@@ -94,7 +102,7 @@ class TrashFilterEngine:
     def _is_numericish(self, word: str) -> bool:
         return bool(self._NUMERICISH_RE.fullmatch(word or ""))
 
-    def _analyze_short_name_profile(self, words: List[str]) -> Dict[str, Any]:
+    def _analyze_name_profile(self, words: List[str]) -> Dict[str, bool]:
         lowered_words = [word.lower() for word in words]
         content_words = [word for word in lowered_words if word not in self._SEMANTIC_FUNCTION_WORDS]
         weak_pool = self._SEMANTIC_DEICTIC_WORDS | self._SEMANTIC_ROUTING_WORDS | self._SEMANTIC_CONTEXT_WORDS | self._SEMANTIC_GENERIC_NAME_WORDS
@@ -105,6 +113,24 @@ class TrashFilterEngine:
         numeric_hits = sum(1 for word in content_words if self._is_numericish(word))
         weak_hits = sum(1 for word in content_words if word in weak_pool or self._is_numericish(word))
         content_count = len(content_words)
+
+        starts_weak = bool(lowered_words and lowered_words[0] in self._SEMANTIC_WEAK_STARTERS)
+        has_linking_verb = any(word in self._SEMANTIC_LINKING_VERBS for word in lowered_words[1:])
+        status_hits = sum(1 for word in lowered_words if word in self._SEMANTIC_STATUS_WORDS)
+        status_subject_hits = sum(1 for word in lowered_words if word in self._SEMANTIC_STATUS_SUBJECT_WORDS)
+        announcement_hits = sum(1 for word in lowered_words if word in self._SEMANTIC_ANNOUNCEMENT_ACTION_WORDS)
+        has_title_word = any(word in self._SEMANTIC_TITLE_WORDS for word in lowered_words)
+        has_title_connector = any(word in self._SEMANTIC_TITLE_CONNECTORS for word in lowered_words)
+
+        role_claim_phrase = False
+        for idx, word in enumerate(lowered_words):
+            if word not in self._SEMANTIC_ROLE_CLAIM_WORDS:
+                continue
+            article_before = idx > 0 and lowered_words[idx - 1] in self._SEMANTIC_ARTICLE_WORDS
+            if article_before or starts_weak or has_linking_verb or any(w in self._SEMANTIC_DEICTIC_WORDS or w in self._SEMANTIC_PRONOUN_WORDS for w in lowered_words[:idx]):
+                role_claim_phrase = True
+                break
+
         return {
             "routing_phrase": len(words) <= 3 and routing_hits >= 1 and (context_hits >= 2 or "ca" in content_words),
             "deictic_generic_construct": len(words) <= 3 and deictic_hits >= 1 and generic_hits >= 1,
@@ -112,6 +138,10 @@ class TrashFilterEngine:
             "generic_context_construct": len(words) <= 3 and generic_hits >= 1 and context_hits >= 1,
             "all_content_weak": content_count >= 2 and weak_hits == content_count,
             "context_heavy_phrase": len(words) <= 4 and content_count >= 2 and weak_hits >= max(2, content_count - 1),
+            "status_update_phrase": len(words) <= 4 and status_hits >= 1 and (status_subject_hits >= 1 or has_linking_verb or starts_weak or announcement_hits >= 1),
+            "announcement_phrase": len(words) >= 3 and announcement_hits >= 1 and (status_hits >= 1 or has_linking_verb or status_subject_hits >= 1),
+            "title_like_narrative": len(words) >= 3 and has_title_word and has_title_connector,
+            "role_claim_phrase": len(words) >= 3 and role_claim_phrase,
         }
 
     def _creator_history_thresholds(self) -> Dict[str, int]:
@@ -344,7 +374,7 @@ class TrashFilterEngine:
             titlecase_words = sum(1 for word in name_words if word[:1].isupper())
             low_capitalization = titlecase_words <= 1
             all_caps_words = sum(1 for word in name_words if len(word) > 1 and word.upper() == word)
-            short_profile = self._analyze_short_name_profile(name_words)
+            profile = self._analyze_name_profile(name_words)
 
             risk_score = 10.0
             hard_reject = False
@@ -388,35 +418,56 @@ class TrashFilterEngine:
                 warnings.append("Claim multi-palabra en mayúsculas")
                 flags.append("all_caps_claim")
 
-            if short_profile["routing_phrase"]:
+            if profile["routing_phrase"]:
                 risk_score += 48.0
                 reasons.append("Nombre corto dominado por routing/contexto, no por branding")
                 flags.append("routing_context_phrase")
                 hard_reject = True
-            if short_profile["deictic_generic_construct"]:
+            if profile["deictic_generic_construct"]:
                 risk_score += 44.0
                 reasons.append("Nombre corto deíctico + genérico, sin identidad propia")
                 flags.append("deictic_generic_construct")
                 hard_reject = True
-            if short_profile["numeric_generic_construct"]:
+            if profile["numeric_generic_construct"]:
                 risk_score += 40.0
                 reasons.append("Nombre corto numérico + genérico, sin branding consistente")
                 flags.append("numeric_generic_construct")
                 hard_reject = True
-            if short_profile["generic_context_construct"]:
+            if profile["generic_context_construct"]:
                 risk_score += 36.0
                 reasons.append("Nombre corto combina léxico genérico con contexto promocional")
                 flags.append("generic_context_construct")
                 hard_reject = True
-            if short_profile["all_content_weak"]:
+            if profile["all_content_weak"]:
                 risk_score += 34.0
                 reasons.append("Nombre corto de baja identidad, compuesto solo por léxico débil")
                 flags.append("low_identity_short_name")
                 hard_reject = True
-            elif short_profile["context_heavy_phrase"]:
+            elif profile["context_heavy_phrase"]:
                 risk_score += 22.0
                 warnings.append("Nombre corto excesivamente cargado de léxico contextual/generico")
                 flags.append("context_heavy_short_name")
+
+            if profile["status_update_phrase"]:
+                risk_score += 44.0
+                reasons.append("Nombre funciona como status/update, no como branding")
+                flags.append("status_update_phrase")
+                hard_reject = True
+            if profile["announcement_phrase"]:
+                risk_score += 40.0
+                reasons.append("Nombre funciona como anuncio o instrucción editorial")
+                flags.append("announcement_phrase")
+                hard_reject = True
+            if profile["title_like_narrative"]:
+                risk_score += 34.0
+                reasons.append("Nombre parece título narrativo/editorial, no nombre de token")
+                flags.append("title_like_narrative_phrase")
+                hard_reject = True
+            if profile["role_claim_phrase"]:
+                risk_score += 36.0
+                reasons.append("Nombre contiene claim de rol/persona, no branding limpio")
+                flags.append("role_claim_phrase")
+                hard_reject = True
 
             if self._SEMANTIC_IMPERATIVE_RE.match(name) and word_count >= 2:
                 risk_score += 42.0
@@ -457,7 +508,12 @@ class TrashFilterEngine:
                 flags.append("inflated_all_caps_phrase")
                 hard_reject = True
 
-            sentence_like = ((word_count >= 4 and ((starts_weak and low_capitalization) or stopword_ratio >= 0.45)) or (word_count >= 3 and clause_like_structure and (narrative_start or function_hits >= 1)) or (time_hit and (starts_weak or low_capitalization or all_caps_words >= 3)) or (low_capitalization and function_hits >= 2))
+            sentence_like = (
+                (word_count >= 4 and ((starts_weak and low_capitalization) or stopword_ratio >= 0.45))
+                or (word_count >= 3 and clause_like_structure and (narrative_start or function_hits >= 1))
+                or (time_hit and (starts_weak or low_capitalization or all_caps_words >= 3))
+                or (low_capitalization and function_hits >= 2)
+            )
             if sentence_like:
                 risk_score += 26.0
                 reasons.append("Nombre luce como frase común o statement, no como token")
