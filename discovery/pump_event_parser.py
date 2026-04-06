@@ -110,6 +110,9 @@ class PumpEventParser:
         "a", "an", "any", "each", "every", "most", "my", "one", "our", "some", "that",
         "the", "their", "these", "this", "those", "your",
     }
+    _NARRATIVE_STARTERS = {"how", "why", "when", "where", "what", "who"}
+    _PRONOUN_WORDS = {"i", "you", "he", "she", "it", "we", "they", "me", "him", "her", "them", "us"}
+    _LINKING_VERBS = {"am", "is", "are", "was", "were", "be", "been", "being"}
 
     def parse(self, data: Dict[str, Any]) -> Optional[ParsedTokenEvent]:
         """Parse token creation event"""
@@ -291,17 +294,29 @@ class PumpEventParser:
 
     def _looks_like_sentence_name(self, words: List[str], original: str) -> bool:
         word_count = len(words)
-        if word_count < 4:
+        if word_count < 3:
             return False
 
         lowered_words = [word.lower() for word in words]
         function_hits = sum(1 for word in lowered_words if word in self._FUNCTION_WORDS)
         stopword_ratio = function_hits / max(word_count, 1)
         starts_weak = lowered_words[0] in self._WEAK_STARTERS
+        narrative_start = lowered_words[0] in self._NARRATIVE_STARTERS
+        has_pronoun = any(word in self._PRONOUN_WORDS for word in lowered_words[1:])
+        has_linking_verb = any(word in self._LINKING_VERBS for word in lowered_words[1:])
         titlecase_words = sum(1 for word in words if word[:1].isupper())
         low_capitalization = titlecase_words <= 1
         all_caps_words = sum(1 for word in words if len(word) > 1 and word.upper() == word)
         ends_with_time_claim = bool(self._SEMANTIC_TIME_RE.search(original))
+
+        if narrative_start and (has_pronoun or has_linking_verb):
+            return True
+
+        if starts_weak and word_count >= 4 and function_hits >= 1:
+            return True
+
+        if has_linking_verb and (narrative_start or starts_weak or function_hits >= 1):
+            return True
 
         if starts_weak and low_capitalization:
             return True

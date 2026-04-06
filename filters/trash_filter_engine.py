@@ -67,6 +67,9 @@ class TrashFilterEngine:
         "a", "an", "any", "each", "every", "most", "my", "one", "our", "some", "that",
         "the", "their", "these", "this", "those", "your",
     }
+    _SEMANTIC_NARRATIVE_STARTERS = {"how", "why", "when", "where", "what", "who"}
+    _SEMANTIC_PRONOUN_WORDS = {"i", "you", "he", "she", "it", "we", "they", "me", "him", "her", "them", "us"}
+    _SEMANTIC_LINKING_VERBS = {"am", "is", "are", "was", "were", "be", "been", "being"}
 
     def __init__(self, store: SQLiteStore, settings: Settings):
         self.store = store
@@ -535,6 +538,9 @@ class TrashFilterEngine:
             function_hits = sum(1 for word in lowered_words if word in self._SEMANTIC_FUNCTION_WORDS)
             stopword_ratio = function_hits / max(word_count, 1)
             starts_weak = bool(lowered_words and lowered_words[0] in self._SEMANTIC_WEAK_STARTERS)
+            narrative_start = bool(lowered_words and lowered_words[0] in self._SEMANTIC_NARRATIVE_STARTERS)
+            has_pronoun = any(word in self._SEMANTIC_PRONOUN_WORDS for word in lowered_words[1:])
+            has_linking_verb = any(word in self._SEMANTIC_LINKING_VERBS for word in lowered_words[1:])
             titlecase_words = sum(1 for word in name_words if word[:1].isupper())
             low_capitalization = titlecase_words <= 1
             all_caps_words = sum(1 for word in name_words if len(word) > 1 and word.upper() == word)
@@ -542,8 +548,12 @@ class TrashFilterEngine:
             risk_score = 10.0
             hard_reject = False
 
+            narrative_clause = word_count == 3 and narrative_start and (has_pronoun or has_linking_verb)
+            weak_lead_phrase = word_count >= 4 and starts_weak and function_hits >= 1
+            clause_like_structure = has_linking_verb and (narrative_start or starts_weak or function_hits >= 1)
+
             if word_count == 3:
-                risk_score += 6.0
+                risk_score += 8.0
             elif word_count >= 4:
                 risk_score += 14.0
                 warnings.append("Nombre demasiado largo para branding temprano")
@@ -567,6 +577,11 @@ class TrashFilterEngine:
                 risk_score += 8.0
                 warnings.append("Nombre inicia como frase o statement")
                 flags.append("weak_starter")
+
+            if narrative_start:
+                risk_score += 16.0
+                warnings.append("Nombre arranca con estructura narrativa")
+                flags.append("narrative_start")
 
             if low_capitalization and word_count >= 4:
                 risk_score += 10.0
@@ -601,17 +616,31 @@ class TrashFilterEngine:
                 flags.append("profane_phrase")
                 hard_reject = True
 
+            if narrative_clause:
+                risk_score += 38.0
+                reasons.append("Nombre con estructura narrativa tipo statement, no tipo token")
+                flags.append("narrative_clause")
+                hard_reject = True
+
+            if weak_lead_phrase:
+                risk_score += 28.0
+                reasons.append("Nombre parece frase común iniciada como statement")
+                flags.append("weak_lead_phrase")
+                hard_reject = True
+
+            if clause_like_structure and not narrative_clause:
+                risk_score += 16.0
+                warnings.append("Nombre contiene verbo o estructura de clause")
+                flags.append("linking_verb_structure")
+
             sentence_like = (
-                word_count >= 4
-                and (
-                    (starts_weak and low_capitalization)
-                    or (function_hits >= 2 and low_capitalization)
-                    or stopword_ratio >= 0.45
-                    or (time_hit and (starts_weak or low_capitalization or all_caps_words >= 3))
-                )
+                (word_count >= 4 and ((starts_weak and low_capitalization) or stopword_ratio >= 0.45))
+                or (word_count >= 3 and clause_like_structure and (narrative_start or function_hits >= 1))
+                or (time_hit and (starts_weak or low_capitalization or all_caps_words >= 3))
+                or (low_capitalization and function_hits >= 2)
             )
             if sentence_like:
-                risk_score += 28.0
+                risk_score += 26.0
                 reasons.append("Nombre luce como frase común o statement, no como token")
                 flags.append("sentence_like_name")
                 hard_reject = True
@@ -621,15 +650,10 @@ class TrashFilterEngine:
                 warnings.append("Puntuación exagerada en nombre")
                 flags.append("excessive_punctuation")
 
-            if symbol:
-                if self._SEMANTIC_GENERIC_SYMBOL_RE.fullmatch(symbol):
-                    risk_score += 14.0
-                    warnings.append("Símbolo genérico o promocional")
-                    flags.append("generic_placeholder_symbol")
-                elif len(symbol) > 8 and not symbol.isupper():
-                    risk_score += 6.0
-                    warnings.append("Símbolo largo poco propio de ticker")
-                    flags.append("long_symbol")
+            if symbol and self._SEMANTIC_GENERIC_SYMBOL_RE.fullmatch(symbol):
+                risk_score += 14.0
+                warnings.append("Símbolo genérico o promocional")
+                flags.append("generic_placeholder_symbol")
 
             if description:
                 description_words = len(self._extract_words(description))
@@ -748,13 +772,13 @@ class TrashFilterEngine:
     ) -> Dict[str, Any]:
         """Combine component risks into one aggregate risk model."""
         weighted_score = (
-            authority_risk["score"] * 0.22
-            + creator_risk["score"] * 0.16
-            + concentration_risk["score"] * 0.12
-            + metadata_risk["score"] * 0.08
+            authority_risk["score"] * 0.20
+            + creator_risk["score"] * 0.15
+            + concentration_risk["score"] * 0.10
+            + metadata_risk["score"] * 0.07
             + honeypot_risk["risk_score"] * 0.18
-            + wallet_cluster_risk.get("score", 0.0) * 0.10
-            + semantic_risk["score"] * 0.14
+            + wallet_cluster_risk.get("score", 0.0) * 0.08
+            + semantic_risk["score"] * 0.22
         )
 
         weighted_score = round(max(0.0, min(100.0, weighted_score)), 2)
@@ -838,7 +862,7 @@ class TrashFilterEngine:
 
         if semantic_risk.get("hard_reject", False):
             rejection_reasons.append("Semantic profile incompatible with token branding")
-        elif semantic_risk.get("score", 0.0) >= 82.0:
+        elif semantic_risk.get("score", 0.0) >= 72.0:
             rejection_reasons.append("Exceeds semantic risk threshold")
 
         if aggregate["risk_score"] > TRASH_FILTER_THRESHOLDS.get("max_total_risk", 75):

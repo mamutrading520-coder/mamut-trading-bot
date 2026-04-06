@@ -35,12 +35,15 @@ class ScoreEngine:
             "sentence_like_name",
             "overlong_phrase",
             "generic_placeholder_symbol",
+            "narrative_clause",
+            "weak_lead_phrase",
+            "linking_verb_structure",
         }
         severe_hits = [flag for flag in semantic_flags if flag in severe_flags]
         if not severe_hits:
             return 0.0
 
-        return min(10.0, 6.0 + max(0, len(severe_hits) - 1) * 2.0)
+        return min(14.0, 8.0 + max(0, len(severe_hits) - 1) * 2.0)
 
     def _compute_quality_score(self, token_data: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -69,7 +72,6 @@ class ScoreEngine:
         score = 62.0
         notes = []
 
-        # Metadata quality: no castigar fuerte si aún no llegó metadata real
         if not metadata_retrieved and not metadata_present:
             notes.append("Metadata pending")
         else:
@@ -86,7 +88,6 @@ class ScoreEngine:
                 score -= 4
                 notes.append("Weak metadata quality")
 
-        # Social presence: señal positiva, pero ausencia no debe matar early tokens
         if social_count >= 3:
             score += 7
             notes.append("Strong social presence")
@@ -98,7 +99,6 @@ class ScoreEngine:
             score -= 1
             notes.append("No socials detected")
 
-        # Early market-cap sanity
         if 15 <= market_cap_sol <= 250:
             score += 6
             notes.append("Healthy early market cap range")
@@ -108,27 +108,30 @@ class ScoreEngine:
             score -= 3
             notes.append("Late/extended market cap profile")
 
-        # Main residual-risk penalty: usar aggregate como castigo principal
         score -= aggregate_risk * 0.38
 
-        # Semantic penalty: castigo directo para borderline semánticos que lograron pasar filtros
-        if semantic_risk >= 85:
-            score -= 14
+        if semantic_risk >= 80:
+            score -= 18
             notes.append("Critical semantic contamination")
-        elif semantic_risk >= 70:
-            score -= 9
+        elif semantic_risk >= 65:
+            score -= 12
             notes.append("High semantic contamination")
-        elif semantic_risk >= 55:
-            score -= 5
-            notes.append("Weak token-brand semantics")
-        elif semantic_risk >= 40:
-            score -= 2
+        elif semantic_risk >= 50:
+            score -= 7
+            notes.append("Narrative or weak token-brand semantics")
+        elif semantic_risk >= 35:
+            score -= 4
+            notes.append("Borderline semantic contamination")
+
+        severe_narrative_flags = {"narrative_clause", "weak_lead_phrase", "sentence_like_name", "linking_verb_structure"}
+        if any(flag in severe_narrative_flags for flag in semantic_flags):
+            score -= 10
+            notes.append("Narrative/statement-style naming detected")
 
         score -= self._semantic_flag_penalty(semantic_flags)
         if semantic_flags:
             notes.append(f"Semantic flags: {', '.join(semantic_flags[:4])}")
 
-        # Secondary fine-tuning only for extreme risks
         if authority_risk >= 80:
             score -= 6
             notes.append("High authority risk")
@@ -161,7 +164,6 @@ class ScoreEngine:
 
         final_score = round(max(0.0, min(100.0, score)), 2)
 
-        # Confidence: mezcla de score, limpieza, semántica y completitud de datos
         data_completeness = 0.0
         if metadata_retrieved or metadata_present:
             data_completeness += 0.2
@@ -179,12 +181,17 @@ class ScoreEngine:
             + data_completeness * 0.15
         )
 
-        if semantic_risk >= 85:
-            confidence -= 0.10
-        elif semantic_risk >= 70:
-            confidence -= 0.06
-        elif semantic_risk >= 55:
+        if semantic_risk >= 80:
+            confidence -= 0.12
+        elif semantic_risk >= 65:
+            confidence -= 0.08
+        elif semantic_risk >= 50:
+            confidence -= 0.05
+        elif semantic_risk >= 35:
             confidence -= 0.03
+
+        if any(flag in severe_narrative_flags for flag in semantic_flags):
+            confidence -= 0.08
 
         confidence = round(max(0.0, min(0.99, confidence)), 4)
 
