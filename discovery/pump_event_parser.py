@@ -1,9 +1,9 @@
-"""Parser for Pump.fun token events"""
+"""Parser for Pump.fun token events."""
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Optional, Dict, Any
+from typing import Any, Dict, List, Optional
 
 from config.thresholds import TOKEN_METADATA_THRESHOLDS
 from monitoring.logger import setup_logger
@@ -13,7 +13,6 @@ logger = setup_logger("PumpEventParser")
 
 @dataclass
 class ParsedTokenEvent:
-    """Parsed token event data"""
     mint: str
     name: str
     symbol: str
@@ -30,7 +29,6 @@ class ParsedTokenEvent:
     creator_resolved: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary"""
         return {
             "mint": self.mint,
             "name": self.name,
@@ -51,37 +49,56 @@ class ParsedTokenEvent:
 
 
 class PumpEventParser:
-    """Parses Pump.fun WebSocket events"""
+    """Parses Pump.fun WebSocket events."""
 
     _CONTROL_CHARS_RE = re.compile(r"[\x00-\x1F\x7F]")
     _MULTISPACE_RE = re.compile(r"\s+")
+    _WORD_RE = re.compile(r"[A-Za-z0-9]+(?:['-][A-Za-z0-9]+)?")
+    _NUMERICISH_RE = re.compile(r"^(?:(?:19|20)\d{2}|\d+[a-z]{0,3})$", re.IGNORECASE)
+    _NON_ALPHA_RE = re.compile(r"[^A-Za-z]+")
+
     _URL_LIKE_RE = re.compile(r"(?:https?://|www\.|t\.me/|discord(?:\.gg|app\.com/))", re.IGNORECASE)
     _MENTION_RE = re.compile(r"(?:@everyone|@here|<@&?|^@[A-Za-z0-9_]+$)", re.IGNORECASE)
     _COMMAND_PREFIX_RE = re.compile(r"^\s*[/!#.]+\s*[a-zA-Z]", re.IGNORECASE)
-    _COMMAND_WITH_AMOUNT_RE = re.compile(
-        r"^\s*[/!]?\s*(buy|sell|swap|ape|long|short|tp|sl)\b.*\b\d+(?:\.\d+)?\b",
-        re.IGNORECASE,
-    )
-    _PAIR_OR_ACTION_RE = re.compile(
-        r"\b(?:buy|sell|swap|ape|long|short|tp|sl)\b.*\b(?:sol|usd|usdc|usdt)\b",
-        re.IGNORECASE,
-    )
-    _IMPERATIVE_PROMPT_RE = re.compile(
-        r"^\s*(?:put|make|create|generate|draw|render|show|turn|dress|write|imagine)\b",
-        re.IGNORECASE,
-    )
-    _AI_PROMPT_RE = re.compile(
-        r"\b(?:grok|chatgpt|midjourney|stable\s*diffusion|dall-?e)\b.*\b(?:imagine|prompt|style|render|draw|make)\b",
-        re.IGNORECASE,
-    )
-    _STYLE_PROMPT_RE = re.compile(
-        r"\b(?:in the style of|prompt:|cinematic|8k|ultra detailed|hyperrealistic)\b",
-        re.IGNORECASE,
-    )
+    _COMMAND_WITH_AMOUNT_RE = re.compile(r"^\s*[/!]?\s*(buy|sell|swap|ape|long|short|tp|sl)\b.*\b\d+(?:\.\d+)?\b", re.IGNORECASE)
+    _PAIR_OR_ACTION_RE = re.compile(r"\b(?:buy|sell|swap|ape|long|short|tp|sl)\b.*\b(?:sol|usd|usdc|usdt)\b", re.IGNORECASE)
+
+    _IMPERATIVE_PROMPT_RE = re.compile(r"^\s*(?:put|make|create|generate|draw|render|show|turn|dress|write|imagine)\b", re.IGNORECASE)
+    _AI_PROMPT_RE = re.compile(r"\b(?:grok|chatgpt|midjourney|stable\s*diffusion|dall-?e)\b.*\b(?:imagine|prompt|style|render|draw|make)\b", re.IGNORECASE)
+    _STYLE_PROMPT_RE = re.compile(r"\b(?:in the style of|prompt:|cinematic|8k|ultra detailed|hyperrealistic)\b", re.IGNORECASE)
+
+    _SEMANTIC_CTA_PREFIX_RE = re.compile(r"^\s*(?:join|buy|sell|open|claim|click|follow|watch|check|visit|send|ape|pump|moon|hold|make|create|generate|show|turn|put|draw|render|write)\b", re.IGNORECASE)
+    _SEMANTIC_PROMO_RE = re.compile(r"\b(?:most|best|biggest|strongest|bullish|viral|official|guaranteed|unstoppable|massive|epic|legendary)\b.*\b(?:community|army|movement|launch|token|coin|memecoin|pump|run|holders|weeks?|days?|today|now|ever)\b", re.IGNORECASE)
+    _SEMANTIC_COMMUNITY_TIME_RE = re.compile(r"\b(?:community|army|movement|holders)\b.*\b(?:weeks?|days?|today|now|ever)\b|\b(?:most|best|biggest|strongest)\b.*\b(?:weeks?|days?|today|now|ever)\b", re.IGNORECASE)
+    _SEMANTIC_TIME_RE = re.compile(r"\b(?:today|tonight|tomorrow|again|ever|forever|weeks?|days?|months?|years?|right now)\b", re.IGNORECASE)
+    _PROFANITY_RE = re.compile(r"\b(?:fuck(?:in|ing)?|shit|bitch|asshole|bastard|damn)\b", re.IGNORECASE)
+
     _VALID_SYMBOL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_$.-]{0,19}$")
+    _GENERIC_ACTION_SYMBOL_RE = re.compile(r"^(?:BUY|SELL|APE|JOIN|FREE|PUMP|NOW|MOON|TEST|TOKEN|COIN|BULLISH)$", re.IGNORECASE)
+
+    _FUNCTION_WORDS = {"a", "an", "and", "as", "at", "by", "for", "from", "in", "into", "of", "on", "or", "the", "to", "with", "without", "within"}
+    _WEAK_STARTERS = {"a", "an", "any", "each", "every", "most", "my", "one", "our", "some", "that", "the", "their", "these", "this", "those", "your"}
+    _NARRATIVE_STARTERS = {"how", "why", "when", "where", "what", "who"}
+    _PRONOUN_WORDS = {"i", "you", "he", "she", "it", "we", "they", "me", "him", "her", "them", "us"}
+    _LINKING_VERBS = {"am", "is", "are", "was", "were", "be", "been", "being"}
+
+    _DEICTIC_WORDS = {"this", "that", "these", "those", "my", "your", "our", "their"}
+    _ROUTING_WORDS = {"ca", "bio", "link", "website", "site", "telegram", "discord", "twitter", "tiktok", "instagram", "insta", "ig", "x"}
+    _CONTEXT_WORDS = {"ca", "bio", "coin", "token", "launch", "live", "website", "site", "telegram", "discord", "twitter", "tiktok", "dex", "paid", "official", "community", "pump", "moon", "cto", "alpha", "trend", "viral"}
+    _GENERIC_NAME_WORDS = {"coin", "token", "wif", "inu", "meme", "memecoin", "sol", "cap"}
+
+    _STATUS_WORDS = {"suspended", "banned", "paused", "delayed", "live", "online", "offline", "out", "listed", "open", "closed", "updated", "broken", "restored", "available", "ready"}
+    _STATUS_SUBJECT_WORDS = {"account", "bundle", "launch", "listing", "website", "site", "server", "dex", "update", "news", "market", "channel", "bio", "link"}
+    _ANNOUNCEMENT_ACTION_WORDS = {"read", "watch", "listen", "check", "join", "follow", "see", "now", "alert", "update", "news", "breaking"}
+    _TITLE_WORDS = {"life", "story", "tale", "diary", "chronicles", "adventures", "journey", "memoirs", "account", "legend", "days", "nights"}
+    _TITLE_CONNECTORS = {"with", "of", "from", "about"}
+    _ROLE_CLAIM_WORDS = {"agent", "groomer", "king", "queen", "hero", "boss", "guru", "dev", "doctor", "hunter", "warrior", "president", "ceo"}
+    _ARTICLE_WORDS = {"a", "an", "the"}
+
+    _GENERIC_PREFIX_WORDS = {"project", "official", "real", "true", "pure", "meta", "super", "ultra", "crypto", "the"}
+    _ASPIRATIONAL_WORDS = {"wealth", "money", "fortune", "profit", "profits", "gains", "freedom", "success", "power", "rich", "riches", "luxury", "glory", "victory", "prosperity"}
 
     def parse(self, data: Dict[str, Any]) -> Optional[ParsedTokenEvent]:
-        """Parse token creation event"""
         try:
             mint = data.get("mint")
             signature = data.get("signature")
@@ -101,12 +118,14 @@ class PumpEventParser:
             name = self._normalize_text(raw_name)
             symbol = self._normalize_text(raw_symbol)
 
-            if not self._is_valid_name(name):
-                logger.info(f"Rejected parser garbage token name: {raw_name!r}")
+            name_rejection_reason = self._get_name_rejection_reason(name)
+            if name_rejection_reason:
+                logger.info(f"Rejected parser garbage token name: {raw_name!r} | reason={name_rejection_reason}")
                 return None
 
-            if not self._is_valid_symbol(symbol):
-                logger.info(f"Rejected parser garbage token symbol: {raw_symbol!r}")
+            symbol_rejection_reason = self._get_symbol_rejection_reason(symbol)
+            if symbol_rejection_reason:
+                logger.info(f"Rejected parser garbage token symbol: {raw_symbol!r} | reason={symbol_rejection_reason}")
                 return None
 
             initial_buy = int(data.get("initialBuy") or 0)
@@ -117,9 +136,7 @@ class PumpEventParser:
             else:
                 initial_sol = 0.0
 
-            v_tokens_in_bonding_curve = int(
-                data.get("vTokensInBondingCurve") or data.get("v_tokens_in_bonding_curve") or 0
-            )
+            v_tokens_in_bonding_curve = int(data.get("vTokensInBondingCurve") or data.get("v_tokens_in_bonding_curve") or 0)
             v_sol_raw = data.get("vSolInBondingCurve") or data.get("v_sol_in_bonding_curve") or 0
             v_sol_in_bonding_curve = float(v_sol_raw) / 1e9 if v_sol_raw else 0.0
 
@@ -147,7 +164,6 @@ class PumpEventParser:
             creator_display = creator[:8] if len(creator) >= 8 else creator
             logger.info(f"✓ Parsed: {symbol} | SOL: {initial_sol:.4f} | Creator: {creator_display}...")
             return parsed
-
         except Exception as e:
             logger.warning(f"Parse error: {e}")
             return None
@@ -158,92 +174,212 @@ class PumpEventParser:
         text = self._MULTISPACE_RE.sub(" ", text).strip()
         return text
 
-    def _is_valid_name(self, value: str) -> bool:
-        if not self._passes_length(value, kind="name"):
-            return False
-
-        if self._URL_LIKE_RE.search(value):
-            return False
-
-        if self._MENTION_RE.search(value):
-            return False
-
-        if self._COMMAND_PREFIX_RE.match(value):
-            return False
-
-        if self._COMMAND_WITH_AMOUNT_RE.match(value):
-            return False
-
-        if self._PAIR_OR_ACTION_RE.search(value) and ("/" in value or any(ch.isdigit() for ch in value)):
-            return False
-
-        if self._looks_like_prompt_text(value):
-            return False
-
-        non_alnum_ratio = sum(1 for ch in value if not ch.isalnum() and ch != " ") / max(len(value), 1)
-        if len(value) >= 8 and non_alnum_ratio > 0.35:
-            return False
-
-        return True
-
-    def _is_valid_symbol(self, value: str) -> bool:
-        if not self._passes_length(value, kind="symbol"):
-            return False
-
-        if " " in value:
-            return False
-
-        if value.startswith("@"):
-            return False
-
-        if self._URL_LIKE_RE.search(value):
-            return False
-
-        if self._MENTION_RE.search(value):
-            return False
-
-        if self._COMMAND_PREFIX_RE.match(value):
-            return False
-
-        if not self._VALID_SYMBOL_RE.fullmatch(value):
-            return False
-
-        return True
-
     def _passes_length(self, value: str, kind: str) -> bool:
         if not value or not value.strip():
             logger.debug(f"Invalid {kind}: empty")
             return False
-
         min_len = TOKEN_METADATA_THRESHOLDS.get(f"min_{kind}_length", 1)
         max_len = TOKEN_METADATA_THRESHOLDS.get(f"max_{kind}_length", 100)
         if len(value) < min_len or len(value) > max_len:
             logger.debug(f"Invalid {kind}: length out of range ({len(value)})")
             return False
-
         return True
+
+    def _is_numericish(self, word: str) -> bool:
+        return bool(self._NUMERICISH_RE.fullmatch(word or ""))
+
+    def _normalized_alpha_view(self, value: str) -> str:
+        return self._NON_ALPHA_RE.sub(" ", value or " ").strip().lower()
+
+    def _contains_profane_lexeme(self, value: str) -> bool:
+        alpha_view = self._normalized_alpha_view(value)
+        return bool(alpha_view and self._PROFANITY_RE.search(alpha_view))
+
+    def _analyze_name_profile(self, words: List[str]) -> Dict[str, bool]:
+        lowered_words = [word.lower() for word in words]
+        content_words = [word for word in lowered_words if word not in self._FUNCTION_WORDS]
+        weak_pool = self._DEICTIC_WORDS | self._ROUTING_WORDS | self._CONTEXT_WORDS | self._GENERIC_NAME_WORDS
+        routing_hits = sum(1 for word in content_words if word in self._ROUTING_WORDS)
+        context_hits = sum(1 for word in content_words if word in self._CONTEXT_WORDS)
+        deictic_hits = sum(1 for word in content_words if word in self._DEICTIC_WORDS)
+        generic_hits = sum(1 for word in content_words if word in self._GENERIC_NAME_WORDS)
+        numeric_hits = sum(1 for word in content_words if self._is_numericish(word))
+        weak_hits = sum(1 for word in content_words if word in weak_pool or self._is_numericish(word))
+        content_count = len(content_words)
+
+        starts_weak = bool(lowered_words and lowered_words[0] in self._WEAK_STARTERS)
+        has_linking_verb = any(word in self._LINKING_VERBS for word in lowered_words[1:])
+        status_hits = sum(1 for word in lowered_words if word in self._STATUS_WORDS)
+        status_subject_hits = sum(1 for word in lowered_words if word in self._STATUS_SUBJECT_WORDS)
+        announcement_hits = sum(1 for word in lowered_words if word in self._ANNOUNCEMENT_ACTION_WORDS)
+        has_title_word = any(word in self._TITLE_WORDS for word in lowered_words)
+        has_title_connector = any(word in self._TITLE_CONNECTORS for word in lowered_words)
+        prefix_hits = sum(1 for word in content_words if word in self._GENERIC_PREFIX_WORDS)
+        aspirational_hits = sum(1 for word in content_words if word in self._ASPIRATIONAL_WORDS)
+
+        role_claim_phrase = False
+        for idx, word in enumerate(lowered_words):
+            if word not in self._ROLE_CLAIM_WORDS:
+                continue
+            article_before = idx > 0 and lowered_words[idx - 1] in self._ARTICLE_WORDS
+            if article_before or starts_weak or has_linking_verb or any(w in self._DEICTIC_WORDS or w in self._PRONOUN_WORDS for w in lowered_words[:idx]):
+                role_claim_phrase = True
+                break
+
+        first_content = content_words[0] if content_words else ""
+        return {
+            "routing_phrase": len(words) <= 3 and routing_hits >= 1 and (context_hits >= 2 or "ca" in content_words),
+            "deictic_generic_construct": len(words) <= 3 and deictic_hits >= 1 and generic_hits >= 1,
+            "numeric_generic_construct": len(words) <= 3 and numeric_hits >= 1 and generic_hits >= 1,
+            "generic_context_construct": len(words) <= 3 and generic_hits >= 1 and context_hits >= 1,
+            "all_content_weak": content_count >= 2 and weak_hits == content_count,
+            "context_heavy_phrase": len(words) <= 4 and content_count >= 2 and weak_hits >= max(2, content_count - 1),
+            "status_update_phrase": len(words) <= 4 and status_hits >= 1 and (status_subject_hits >= 1 or has_linking_verb or starts_weak or announcement_hits >= 1),
+            "announcement_phrase": len(words) >= 3 and announcement_hits >= 1 and (status_hits >= 1 or has_linking_verb or status_subject_hits >= 1),
+            "title_like_narrative": len(words) >= 3 and has_title_word and has_title_connector,
+            "role_claim_phrase": len(words) >= 3 and role_claim_phrase,
+            "generic_prefix_branding": len(words) <= 3 and content_count >= 2 and first_content in self._GENERIC_PREFIX_WORDS and prefix_hits >= 1,
+            "aspirational_generic_branding": len(words) <= 3 and content_count >= 2 and aspirational_hits >= 1 and aspirational_hits + generic_hits + prefix_hits >= content_count,
+        }
+
+    def _get_name_rejection_reason(self, value: str) -> Optional[str]:
+        if not self._passes_length(value, kind="name"):
+            return "length out of range"
+        if self._URL_LIKE_RE.search(value):
+            return "url-like metadata"
+        if self._MENTION_RE.search(value):
+            return "mention-like metadata"
+        if self._COMMAND_PREFIX_RE.match(value):
+            return "command-like prefix"
+        if self._COMMAND_WITH_AMOUNT_RE.match(value):
+            return "trade command with amount"
+        if self._PAIR_OR_ACTION_RE.search(value) and ("/" in value or any(ch.isdigit() for ch in value)):
+            return "pair/action expression"
+        if self._looks_like_prompt_text(value):
+            return "prompt-like text"
+        semantic_reason = self._get_semantic_name_rejection_reason(value)
+        if semantic_reason:
+            return semantic_reason
+        non_alnum_ratio = sum(1 for ch in value if not ch.isalnum() and ch != " ") / max(len(value), 1)
+        if len(value) >= 8 and non_alnum_ratio > 0.35:
+            return "too many non-alphanumeric characters"
+        return None
+
+    def _get_symbol_rejection_reason(self, value: str) -> Optional[str]:
+        if not self._passes_length(value, kind="symbol"):
+            return "length out of range"
+        if " " in value:
+            return "contains spaces"
+        if value.startswith("@"):
+            return "starts with @"
+        if self._URL_LIKE_RE.search(value):
+            return "url-like metadata"
+        if self._MENTION_RE.search(value):
+            return "mention-like metadata"
+        if self._COMMAND_PREFIX_RE.match(value):
+            return "command-like prefix"
+        if not self._VALID_SYMBOL_RE.fullmatch(value):
+            return "invalid symbol format"
+        if self._GENERIC_ACTION_SYMBOL_RE.fullmatch(value):
+            return "generic action/promotional symbol"
+        if self._contains_profane_lexeme(value):
+            return "profane/low-grade symbol"
+        return None
+
+    def _get_semantic_name_rejection_reason(self, value: str) -> Optional[str]:
+        normalized = value.strip()
+        words = self._tokenize_words(normalized)
+        word_count = len(words)
+        lowered_words = [word.lower() for word in words]
+        function_hits = sum(1 for word in lowered_words if word in self._FUNCTION_WORDS)
+        all_caps_words = sum(1 for word in words if len(word) > 1 and word.upper() == word)
+        profile = self._analyze_name_profile(words)
+
+        if word_count > 5:
+            return "overlong phrase-like name"
+        if profile["routing_phrase"]:
+            return "routing/context phrase"
+        if profile["deictic_generic_construct"]:
+            return "deictic generic phrase"
+        if profile["numeric_generic_construct"]:
+            return "numeric generic phrase"
+        if profile["generic_context_construct"]:
+            return "generic context phrase"
+        if profile["generic_prefix_branding"]:
+            return "generic prefix branding phrase"
+        if profile["aspirational_generic_branding"]:
+            return "aspirational/generic branding phrase"
+        if profile["all_content_weak"]:
+            return "low-identity weak phrase"
+        if profile["status_update_phrase"]:
+            return "status/update phrase"
+        if profile["announcement_phrase"]:
+            return "announcement phrase"
+        if profile["title_like_narrative"]:
+            return "title-like narrative phrase"
+        if profile["role_claim_phrase"]:
+            return "role/agent claim phrase"
+        if word_count >= 4 and all_caps_words >= 3 and function_hits <= 1:
+            return "all-caps inflated branding phrase"
+        if self._SEMANTIC_PROMO_RE.search(normalized) or self._SEMANTIC_COMMUNITY_TIME_RE.search(normalized):
+            return "promotional/community slogan"
+        if self._SEMANTIC_CTA_PREFIX_RE.match(normalized) and word_count >= 2:
+            return "imperative/cta phrase"
+        if self._contains_profane_lexeme(normalized) and word_count >= 2:
+            return "aggressive/profane phrase"
+        if self._looks_like_sentence_name(words, normalized):
+            return "sentence-like/common phrase"
+        return None
+
+    def _looks_like_sentence_name(self, words: List[str], original: str) -> bool:
+        word_count = len(words)
+        if word_count < 3:
+            return False
+        lowered_words = [word.lower() for word in words]
+        function_hits = sum(1 for word in lowered_words if word in self._FUNCTION_WORDS)
+        stopword_ratio = function_hits / max(word_count, 1)
+        starts_weak = lowered_words[0] in self._WEAK_STARTERS
+        narrative_start = lowered_words[0] in self._NARRATIVE_STARTERS
+        has_pronoun = any(word in self._PRONOUN_WORDS for word in lowered_words[1:])
+        has_linking_verb = any(word in self._LINKING_VERBS for word in lowered_words[1:])
+        titlecase_words = sum(1 for word in words if word[:1].isupper())
+        low_capitalization = titlecase_words <= 1
+        all_caps_words = sum(1 for word in words if len(word) > 1 and word.upper() == word)
+        ends_with_time_claim = bool(self._SEMANTIC_TIME_RE.search(original))
+
+        if narrative_start and (has_pronoun or has_linking_verb):
+            return True
+        if starts_weak and word_count >= 4 and function_hits >= 1:
+            return True
+        if has_linking_verb and (narrative_start or starts_weak or function_hits >= 1):
+            return True
+        if starts_weak and low_capitalization:
+            return True
+        if stopword_ratio >= 0.45:
+            return True
+        if ends_with_time_claim and (starts_weak or stopword_ratio >= 0.25 or all_caps_words >= 3):
+            return True
+        if low_capitalization and function_hits >= 2:
+            return True
+        return False
+
+    def _tokenize_words(self, value: str) -> List[str]:
+        return self._WORD_RE.findall(value or "")
 
     def _looks_like_prompt_text(self, value: str) -> bool:
         normalized = value.strip()
         lowered = normalized.lower()
         words = [word for word in normalized.split(" ") if word]
-
         if self._AI_PROMPT_RE.search(normalized):
             return True
-
         if self._STYLE_PROMPT_RE.search(normalized) and len(words) >= 3:
             return True
-
         if self._IMPERATIVE_PROMPT_RE.match(normalized) and len(words) >= 3:
             return True
-
         if lowered.startswith(("put ", "make ", "create ", "generate ", "draw ", "render ", "turn ")) and len(words) >= 3:
             return True
-
         if "grok imagine" in lowered or "chatgpt prompt" in lowered or "midjourney prompt" in lowered:
             return True
-
         if any(pronoun in lowered for pronoun in [" her ", " him ", " them ", " it "]) and self._IMPERATIVE_PROMPT_RE.match(normalized):
             return True
-
         return False

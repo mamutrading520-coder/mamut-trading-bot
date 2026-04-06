@@ -1,9 +1,9 @@
-"""Decision mapper for token scoring analysis"""
+"""Decision mapper for token scoring analysis."""
 
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from monitoring.logger import setup_logger
 from config.settings import Settings
@@ -37,7 +37,34 @@ DECISION_METADATA = {
 
 
 class DecisionMapper:
-    """Maps score outputs to trading decisions."""
+    """Maps score outputs to pipeline decisions."""
+
+    _STRICT_SIGNAL_EARLY_FLAGS: Set[str] = {
+        "routing_context_phrase",
+        "deictic_generic_construct",
+        "numeric_generic_construct",
+        "generic_context_construct",
+        "low_identity_short_name",
+        "status_update_phrase",
+        "announcement_phrase",
+        "title_like_narrative_phrase",
+        "role_claim_phrase",
+        "generic_prefix_branding",
+        "aspirational_generic_branding",
+        "profane_symbol",
+        "profane_phrase",
+        "promo_slogan",
+        "cta_phrase",
+    }
+    _REVIEW_SIGNAL_EARLY_FLAGS: Set[str] = {
+        "context_heavy_short_name",
+        "inflated_all_caps_phrase",
+        "sentence_like_name",
+        "weak_lead_phrase",
+        "linking_verb_structure",
+        "all_caps_claim",
+        "multiword_name",
+    }
 
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -57,13 +84,33 @@ class DecisionMapper:
         except (TypeError, ValueError):
             return default
 
+    def _safe_bool(self, value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return False
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(value)
+
+    def _get_breakdown(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return payload.get("score_breakdown", {}) or {}
+
+    def _get_semantic_flags(self, payload: Dict[str, Any]) -> Set[str]:
+        breakdown = self._get_breakdown(payload)
+        flags = breakdown.get("semantic_flags")
+        if flags is None:
+            flags = payload.get("semantic_risk_flags", []) or []
+        return {str(flag) for flag in flags if flag}
+
     def _make_reasoning(self, score_analysis: Dict[str, Any], decision: str) -> str:
         final_score = self._safe_float(score_analysis.get("final_score", 0))
         confidence = self._safe_float(score_analysis.get("confidence", 0))
         aggregate_risk = self._safe_float(score_analysis.get("aggregate_risk_score", 0))
 
-        breakdown = score_analysis.get("score_breakdown", {}) or {}
+        breakdown = self._get_breakdown(score_analysis)
         notes = breakdown.get("notes", []) or []
+        adjustments = score_analysis.get("decision_adjustments", []) or []
 
         reasoning = (
             f"Decision={decision} | "
@@ -75,10 +122,68 @@ class DecisionMapper:
         if score_analysis.get("creator_resolved") is False:
             reasoning += " | creator_resolved=False"
 
+        if adjustments:
+            reasoning += f" | Adjustments: {', '.join(adjustments)}"
+
         if notes:
             reasoning += f" | Notes: {', '.join(notes)}"
 
         return reasoning
+
+    def _apply_signal_early_guards(self, payload: Dict[str, Any]) -> List[str]:
+        adjustments: List[str] = []
+
+        final_score = self._safe_float(payload.get("final_score", 0))
+        confidence = self._safe_float(payload.get("confidence", 0))
+        aggregate_risk = self._safe_float(payload.get("aggregate_risk_score", 50))
+        creator_risk = self._safe_float(payload.get("creator_risk", 0))
+        wallet_cluster_risk = self._safe_float(payload.get("wallet_cluster_risk", 0))
+        honeypot_risk = self._safe_float(payload.get("honeypot_risk", 0))
+
+        breakdown = self._get_breakdown(payload)
+        semantic_risk = self._safe_float(
+            breakdown.get("semantic_risk", payload.get("semantic_risk", 0)),
+        )
+        metadata_score = self._safe_float(
+            breakdown.get("metadata_score", payload.get("metadata_score", 0)),
+        )
+        semantic_gate_applied = self._safe_bool(
+            breakdown.get("semantic_early_gate_applied", False)
+        )
+        semantic_flags = self._get_semantic_flags(payload)
+
+        strict_high_threshold = max(float(self.settings.score_threshold_high_potential), 63.0)
+        strict_min_confidence = max(float(self.settings.signal_early_min_confidence), 0.67)
+        strict_max_aggregate_risk = min(float(self.settings.signal_early_max_aggregate_risk), 30.0)
+
+        if final_score < strict_high_threshold:
+            adjustments.append(f"signal_early_score_floor<{strict_high_threshold:.0f}")
+        if confidence < strict_min_confidence:
+            adjustments.append(f"signal_early_confidence_floor<{strict_min_confidence:.2f}")
+        if aggregate_risk > strict_max_aggregate_risk:
+            adjustments.append(f"signal_early_risk_cap>{strict_max_aggregate_risk:.0f}")
+        if semantic_gate_applied:
+            adjustments.append("semantic_early_gate_applied")
+        if semantic_risk >= 15.0:
+            adjustments.append(f"semantic_risk={semantic_risk:.1f}")
+        if semantic_flags & self._STRICT_SIGNAL_EARLY_FLAGS:
+            adjustments.append(
+                "strict_semantic_flags=" + ",".join(sorted(semantic_flags & self._STRICT_SIGNAL_EARLY_FLAGS))
+            )
+        elif semantic_flags & self._REVIEW_SIGNAL_EARLY_FLAGS and semantic_risk >= 12.0:
+            adjustments.append(
+                "review_semantic_flags=" + ",".join(sorted(semantic_flags & self._REVIEW_SIGNAL_EARLY_FLAGS))
+            )
+        if metadata_score < 65.0:
+            adjustments.append(f"metadata_score={metadata_score:.0f}")
+        if wallet_cluster_risk >= 45.0:
+            adjustments.append(f"wallet_cluster_risk={wallet_cluster_risk:.0f}")
+        if creator_risk >= 50.0:
+            adjustments.append(f"creator_risk={creator_risk:.0f}")
+        if honeypot_risk >= 40.0:
+            adjustments.append(f"honeypot_risk={honeypot_risk:.0f}")
+
+        return adjustments
 
     def _map_decision(self, score_analysis: Dict[str, Any]) -> Dict[str, Any]:
         final_score = self._safe_float(score_analysis.get("final_score", 0))
@@ -114,15 +219,25 @@ class DecisionMapper:
         else:
             decision = "REJECT"
 
-        if decision == "SIGNAL_EARLY" and score_analysis.get("creator_resolved") is False:
+        decision_adjustments: List[str] = []
+
+        if decision == "SIGNAL_EARLY":
+            decision_adjustments.extend(self._apply_signal_early_guards(score_analysis))
+            if decision_adjustments:
+                decision = "MONITOR"
+                logger.debug(
+                    f"Downgraded {symbol} SIGNAL_EARLY → MONITOR: {'; '.join(decision_adjustments)}"
+                )
+
+        if score_analysis.get("creator_resolved") is False and decision == "SIGNAL_EARLY":
             decision = "MONITOR"
+            decision_adjustments.append("creator_resolved=False")
             logger.debug(
                 f"Downgraded {symbol} SIGNAL_EARLY → MONITOR: creator_resolved=False"
             )
 
         meta = DECISION_METADATA[decision]
-
-        return {
+        decision_payload = {
             "mint": mint,
             "symbol": symbol,
             "final_score": final_score,
@@ -133,17 +248,22 @@ class DecisionMapper:
             "description": meta["description"],
             "aggregate_risk_score": aggregate_risk,
             "score_breakdown": score_analysis.get("score_breakdown", {}),
-            "reasoning": self._make_reasoning(score_analysis, decision),
+            "decision_adjustments": decision_adjustments,
             "decision_gates": {
                 "signal_early_min_score": high_threshold,
                 "signal_early_min_confidence": signal_early_min_confidence,
                 "signal_early_max_aggregate_risk": signal_early_max_aggregate_risk,
+                "signal_early_strict_min_score": max(high_threshold, 63.0),
+                "signal_early_strict_min_confidence": max(signal_early_min_confidence, 0.67),
+                "signal_early_strict_max_aggregate_risk": min(signal_early_max_aggregate_risk, 30.0),
                 "monitor_min_score": medium_threshold,
                 "monitor_min_confidence": monitor_min_confidence,
                 "monitor_max_aggregate_risk": monitor_max_aggregate_risk,
             },
             "timestamp": datetime.utcnow().isoformat(),
         }
+        decision_payload["reasoning"] = self._make_reasoning(decision_payload, decision)
+        return decision_payload
 
     def make_decision(self, score_analysis: Dict[str, Any]) -> Dict[str, Any]:
         """Make decision based on score + confidence + residual risk."""
