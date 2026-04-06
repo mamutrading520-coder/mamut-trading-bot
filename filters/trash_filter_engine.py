@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Dict, Any, Optional, List, Tuple
 from datetime import datetime
 
@@ -25,6 +26,48 @@ logger = setup_logger("TrashFilterEngine")
 class TrashFilterEngine:
     """Filters out low-quality and scam-like tokens using coordinated risk checks."""
 
+    _CONTROL_CHARS_RE = re.compile(r"[\x00-\x1F\x7F]")
+    _MULTISPACE_RE = re.compile(r"\s+")
+    _WORD_RE = re.compile(r"[A-Za-z0-9]+(?:['-][A-Za-z0-9]+)?")
+    _SEMANTIC_IMPERATIVE_RE = re.compile(
+        r"^\s*(?:join|buy|sell|open|claim|click|follow|watch|check|visit|send|ape|pump|moon|hold|make|create|generate|show|turn|put|draw|render|write)\b",
+        re.IGNORECASE,
+    )
+    _SEMANTIC_PROMO_RE = re.compile(
+        r"\b(?:most|best|biggest|strongest|bullish|viral|official|guaranteed|unstoppable|massive|epic|legendary|ultimate|alpha)\b.*\b(?:community|army|movement|launch|token|coin|memecoin|pump|run|holders|weeks?|days?|today|now|ever)\b",
+        re.IGNORECASE,
+    )
+    _SEMANTIC_COMMUNITY_RE = re.compile(
+        r"\b(?:community|army|movement|holders|family|club|gang|squad)\b",
+        re.IGNORECASE,
+    )
+    _SEMANTIC_CLAIM_RE = re.compile(
+        r"\b(?:most|best|biggest|strongest|bullish|viral|official|guaranteed|unstoppable|massive|epic|legendary|alpha|moonshot|x100|100x)\b",
+        re.IGNORECASE,
+    )
+    _SEMANTIC_TIME_RE = re.compile(
+        r"\b(?:today|tonight|tomorrow|again|ever|forever|weeks?|days?|months?|years?|right now)\b",
+        re.IGNORECASE,
+    )
+    _SEMANTIC_PROFANITY_RE = re.compile(
+        r"\b(?:fuck(?:in|ing)?|shit|bitch|asshole|bastard|damn)\b",
+        re.IGNORECASE,
+    )
+    _SEMANTIC_EXCESSIVE_PUNCT_RE = re.compile(r"[!?]{2,}|[._-]{3,}")
+    _SEMANTIC_GENERIC_SYMBOL_RE = re.compile(
+        r"^(?:BUY|SELL|APE|JOIN|FREE|PUMP|NOW|MOON|TEST|TOKEN|COIN|BULLISH|ALPHA)$",
+        re.IGNORECASE,
+    )
+
+    _SEMANTIC_FUNCTION_WORDS = {
+        "a", "an", "and", "as", "at", "by", "for", "from", "in", "into", "of", "on",
+        "or", "the", "to", "with", "without", "within",
+    }
+    _SEMANTIC_WEAK_STARTERS = {
+        "a", "an", "any", "each", "every", "most", "my", "one", "our", "some", "that",
+        "the", "their", "these", "this", "those", "your",
+    }
+
     def __init__(self, store: SQLiteStore, settings: Settings):
         self.store = store
         self.settings = settings
@@ -35,6 +78,15 @@ class TrashFilterEngine:
 
         self.passed = 0
         self.rejected = 0
+
+    def _normalize_text(self, value: Any) -> str:
+        text = str(value or "")
+        text = self._CONTROL_CHARS_RE.sub(" ", text)
+        text = self._MULTISPACE_RE.sub(" ", text).strip()
+        return text
+
+    def _extract_words(self, value: str) -> List[str]:
+        return self._WORD_RE.findall(value or "")
 
     def _is_null_like(self, value: Optional[str]) -> bool:
         """Normalize Solana null/renounced authority values."""
@@ -453,6 +505,183 @@ class TrashFilterEngine:
                 "metadata_present": False,
             }
 
+    def _calculate_semantic_risk(self, token_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Calculate semantic quality risk from token naming and branding."""
+        try:
+            name = self._normalize_text(token_data.get("name"))
+            symbol = self._normalize_text(token_data.get("symbol"))
+            description = self._normalize_text(token_data.get("description"))
+
+            reasons: List[str] = []
+            warnings: List[str] = []
+            flags: List[str] = []
+
+            if not name:
+                return {
+                    "score": 90.0,
+                    "reasons": ["Nombre de token ausente"],
+                    "warnings": [],
+                    "flags": ["missing_name"],
+                    "hard_reject": True,
+                    "name": "",
+                    "symbol": symbol,
+                    "word_count": 0,
+                    "stopword_ratio": 0.0,
+                }
+
+            name_words = self._extract_words(name)
+            lowered_words = [word.lower() for word in name_words]
+            word_count = len(name_words)
+            function_hits = sum(1 for word in lowered_words if word in self._SEMANTIC_FUNCTION_WORDS)
+            stopword_ratio = function_hits / max(word_count, 1)
+            starts_weak = bool(lowered_words and lowered_words[0] in self._SEMANTIC_WEAK_STARTERS)
+            titlecase_words = sum(1 for word in name_words if word[:1].isupper())
+            low_capitalization = titlecase_words <= 1
+            all_caps_words = sum(1 for word in name_words if len(word) > 1 and word.upper() == word)
+
+            risk_score = 10.0
+            hard_reject = False
+
+            if word_count == 3:
+                risk_score += 6.0
+            elif word_count >= 4:
+                risk_score += 14.0
+                warnings.append("Nombre demasiado largo para branding temprano")
+                flags.append("multiword_name")
+
+            if word_count > 5:
+                risk_score += 12.0
+                reasons.append("Nombre excesivamente largo y poco propio de ticker")
+                flags.append("overlong_phrase")
+
+            if function_hits >= 2:
+                risk_score += 10.0
+                warnings.append("Nombre con demasiadas palabras funcionales")
+                flags.append("high_stopword_load")
+            elif stopword_ratio >= 0.34 and word_count >= 3:
+                risk_score += 6.0
+                warnings.append("Nombre con estructura poco compacta")
+                flags.append("stopword_heavy")
+
+            if starts_weak and word_count >= 3:
+                risk_score += 8.0
+                warnings.append("Nombre inicia como frase o statement")
+                flags.append("weak_starter")
+
+            if low_capitalization and word_count >= 4:
+                risk_score += 10.0
+                warnings.append("Capitalización de frase común o narrativa")
+                flags.append("common_phrase_casing")
+
+            if all_caps_words >= 3 and word_count >= 4:
+                risk_score += 10.0
+                warnings.append("Claim multi-palabra en mayúsculas")
+                flags.append("all_caps_claim")
+
+            if self._SEMANTIC_IMPERATIVE_RE.match(name) and word_count >= 2:
+                risk_score += 42.0
+                reasons.append("Nombre se comporta como CTA o frase imperativa")
+                flags.append("cta_phrase")
+                hard_reject = True
+
+            promo_hit = self._SEMANTIC_PROMO_RE.search(name)
+            claim_hit = self._SEMANTIC_CLAIM_RE.search(name)
+            community_hit = self._SEMANTIC_COMMUNITY_RE.search(name)
+            time_hit = self._SEMANTIC_TIME_RE.search(name)
+
+            if promo_hit or (claim_hit and (community_hit or time_hit)):
+                risk_score += 36.0
+                reasons.append("Nombre con semántica promocional o slogan narrativo")
+                flags.append("promo_slogan")
+                hard_reject = True
+
+            if self._SEMANTIC_PROFANITY_RE.search(name) and word_count >= 2:
+                risk_score += 30.0
+                reasons.append("Nombre agresivo o profano impropio de branding serio")
+                flags.append("profane_phrase")
+                hard_reject = True
+
+            sentence_like = (
+                word_count >= 4
+                and (
+                    (starts_weak and low_capitalization)
+                    or (function_hits >= 2 and low_capitalization)
+                    or stopword_ratio >= 0.45
+                    or (time_hit and (starts_weak or low_capitalization or all_caps_words >= 3))
+                )
+            )
+            if sentence_like:
+                risk_score += 28.0
+                reasons.append("Nombre luce como frase común o statement, no como token")
+                flags.append("sentence_like_name")
+                hard_reject = True
+
+            if self._SEMANTIC_EXCESSIVE_PUNCT_RE.search(name):
+                risk_score += 8.0
+                warnings.append("Puntuación exagerada en nombre")
+                flags.append("excessive_punctuation")
+
+            if symbol:
+                if self._SEMANTIC_GENERIC_SYMBOL_RE.fullmatch(symbol):
+                    risk_score += 14.0
+                    warnings.append("Símbolo genérico o promocional")
+                    flags.append("generic_placeholder_symbol")
+                elif len(symbol) > 8 and not symbol.isupper():
+                    risk_score += 6.0
+                    warnings.append("Símbolo largo poco propio de ticker")
+                    flags.append("long_symbol")
+
+            if description:
+                description_words = len(self._extract_words(description))
+                if (
+                    description_words >= 6
+                    and (
+                        self._SEMANTIC_IMPERATIVE_RE.match(description)
+                        or self._SEMANTIC_PROMO_RE.search(description)
+                    )
+                ):
+                    risk_score += 8.0
+                    warnings.append("Descripción refuerza tono promocional o CTA")
+                    flags.append("promo_description")
+
+            concise_brandlike = (
+                word_count <= 2
+                and function_hits == 0
+                and not hard_reject
+                and "multiword_name" not in flags
+                and "generic_placeholder_symbol" not in flags
+            )
+            if concise_brandlike:
+                risk_score -= 6.0
+
+            risk_score = round(max(0.0, min(100.0, risk_score)), 2)
+
+            return {
+                "score": risk_score,
+                "reasons": reasons,
+                "warnings": warnings,
+                "flags": flags,
+                "hard_reject": hard_reject,
+                "name": name,
+                "symbol": symbol,
+                "word_count": word_count,
+                "stopword_ratio": round(stopword_ratio, 3),
+            }
+
+        except Exception as e:
+            logger.debug(f"Error calculating semantic risk: {e}")
+            return {
+                "score": 55.0,
+                "reasons": [f"Semantic risk fallback: {e}"],
+                "warnings": [],
+                "flags": ["semantic_risk_error"],
+                "hard_reject": False,
+                "name": self._normalize_text(token_data.get("name")),
+                "symbol": self._normalize_text(token_data.get("symbol")),
+                "word_count": 0,
+                "stopword_ratio": 0.0,
+            }
+
     def _build_honeypot_input(
         self,
         token_data: Dict[str, Any],
@@ -515,15 +744,17 @@ class TrashFilterEngine:
         metadata_risk: Dict[str, Any],
         honeypot_risk: Dict[str, Any],
         wallet_cluster_risk: Dict[str, Any],
+        semantic_risk: Dict[str, Any],
     ) -> Dict[str, Any]:
         """Combine component risks into one aggregate risk model."""
         weighted_score = (
-            authority_risk["score"] * 0.25
-            + creator_risk["score"] * 0.18
-            + concentration_risk["score"] * 0.15
-            + metadata_risk["score"] * 0.10
-            + honeypot_risk["risk_score"] * 0.20
-            + wallet_cluster_risk.get("score", 0.0) * 0.12
+            authority_risk["score"] * 0.22
+            + creator_risk["score"] * 0.16
+            + concentration_risk["score"] * 0.12
+            + metadata_risk["score"] * 0.08
+            + honeypot_risk["risk_score"] * 0.18
+            + wallet_cluster_risk.get("score", 0.0) * 0.10
+            + semantic_risk["score"] * 0.14
         )
 
         weighted_score = round(max(0.0, min(100.0, weighted_score)), 2)
@@ -535,6 +766,7 @@ class TrashFilterEngine:
             + metadata_risk.get("reasons", [])
             + honeypot_risk.get("reasons", [])
             + wallet_cluster_risk.get("wallet_cluster_flags", [])
+            + semantic_risk.get("reasons", [])
         )
 
         warnings = (
@@ -543,6 +775,7 @@ class TrashFilterEngine:
             + concentration_risk.get("warnings", [])
             + metadata_risk.get("warnings", [])
             + honeypot_risk.get("warnings", [])
+            + semantic_risk.get("warnings", [])
         )
 
         if weighted_score >= 75:
@@ -569,6 +802,7 @@ class TrashFilterEngine:
         metadata_risk: Dict[str, Any],
         honeypot_risk: Dict[str, Any],
         wallet_cluster_risk: Dict[str, Any],
+        semantic_risk: Dict[str, Any],
         aggregate: Dict[str, Any],
     ) -> Tuple[bool, List[str]]:
         """Determine whether the token should be rejected by hard/aggregate rules."""
@@ -602,6 +836,11 @@ class TrashFilterEngine:
         if wallet_cluster_risk.get("score", 0.0) > WALLET_CLUSTER_THRESHOLDS.get("max_wallet_cluster_risk", 80):
             rejection_reasons.append("Extreme wallet cluster concentration detected")
 
+        if semantic_risk.get("hard_reject", False):
+            rejection_reasons.append("Semantic profile incompatible with token branding")
+        elif semantic_risk.get("score", 0.0) >= 82.0:
+            rejection_reasons.append("Exceeds semantic risk threshold")
+
         if aggregate["risk_score"] > TRASH_FILTER_THRESHOLDS.get("max_total_risk", 75):
             rejection_reasons.append("Exceeds aggregate trash-filter risk threshold")
 
@@ -620,6 +859,7 @@ class TrashFilterEngine:
             creator_risk = self._calculate_creator_risk(token_data)
             concentration_risk = self._calculate_concentration_risk(token_data)
             metadata_risk = self._calculate_metadata_risk(token_data)
+            semantic_risk = self._calculate_semantic_risk(token_data)
             wallet_cluster_risk = await self.wallet_cluster_checker.analyze(token_data)
 
             honeypot_input = self._build_honeypot_input(
@@ -635,6 +875,7 @@ class TrashFilterEngine:
                 metadata_risk=metadata_risk,
                 honeypot_risk=honeypot_risk,
                 wallet_cluster_risk=wallet_cluster_risk,
+                semantic_risk=semantic_risk,
             )
 
             reject, rejection_reasons = self._should_reject(
@@ -644,6 +885,7 @@ class TrashFilterEngine:
                 metadata_risk=metadata_risk,
                 honeypot_risk=honeypot_risk,
                 wallet_cluster_risk=wallet_cluster_risk,
+                semantic_risk=semantic_risk,
                 aggregate=aggregate,
             )
 
@@ -654,6 +896,7 @@ class TrashFilterEngine:
                 "metadata_risk": metadata_risk,
                 "honeypot_risk": honeypot_risk,
                 "wallet_cluster_risk": wallet_cluster_risk,
+                "semantic_risk": semantic_risk,
             }
 
             if reject:
@@ -670,6 +913,8 @@ class TrashFilterEngine:
                         "aggregate_risk_level": aggregate["risk_level"],
                         "component_results": component_results,
                         "warnings": aggregate["warnings"],
+                        "semantic_risk": semantic_risk["score"],
+                        "semantic_risk_flags": semantic_risk.get("flags", []),
                     },
                     source="TrashFilterEngine",
                     timestamp=datetime.utcnow(),
@@ -678,7 +923,7 @@ class TrashFilterEngine:
                 await self.event_bus.emit(rejection_event)
                 logger.warning(
                     f"[REJECTED] {mint[:8]}... | risk={aggregate['risk_score']:.1f} | "
-                    f"{rejection_reasons[0]}"
+                    f"semantic={semantic_risk['score']:.1f} | {rejection_reasons[0]}"
                 )
                 return "REJECTED"
 
@@ -698,6 +943,8 @@ class TrashFilterEngine:
                     "metadata_risk": metadata_risk["score"],
                     "honeypot_risk": honeypot_risk["risk_score"],
                     "wallet_cluster_risk": wallet_cluster_risk.get("score", 0.0),
+                    "semantic_risk": semantic_risk["score"],
+                    "semantic_risk_flags": semantic_risk.get("flags", []),
                 },
                 source="TrashFilterEngine",
                 timestamp=datetime.utcnow(),
@@ -707,7 +954,7 @@ class TrashFilterEngine:
             logger.info(
                 f"[PASSED FILTERS] {mint[:8]}... | total_risk={aggregate['risk_score']:.1f} "
                 f"| auth={authority_risk['score']:.0f} creator={creator_risk['score']:.0f} "
-                f"| cluster={wallet_cluster_risk.get('score', 0.0):.0f}"
+                f"| semantic={semantic_risk['score']:.0f} cluster={wallet_cluster_risk.get('score', 0.0):.0f}"
             )
             return "PASSED"
 

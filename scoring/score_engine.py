@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Dict, Any
+from typing import Dict, Any, List
 from datetime import datetime
 
 from monitoring.logger import setup_logger
@@ -27,6 +27,21 @@ class ScoreEngine:
         except (TypeError, ValueError):
             return default
 
+    def _semantic_flag_penalty(self, semantic_flags: List[str]) -> float:
+        severe_flags = {
+            "cta_phrase",
+            "promo_slogan",
+            "profane_phrase",
+            "sentence_like_name",
+            "overlong_phrase",
+            "generic_placeholder_symbol",
+        }
+        severe_hits = [flag for flag in semantic_flags if flag in severe_flags]
+        if not severe_hits:
+            return 0.0
+
+        return min(10.0, 6.0 + max(0, len(severe_hits) - 1) * 2.0)
+
     def _compute_quality_score(self, token_data: Dict[str, Any]) -> Dict[str, Any]:
         """
         Build final score from early-stage quality signals and residual risk.
@@ -45,6 +60,8 @@ class ScoreEngine:
         concentration_risk = self._safe_float(token_data.get("concentration_risk", 35))
         metadata_risk = self._safe_float(token_data.get("metadata_risk", 40))
         honeypot_risk = self._safe_float(token_data.get("honeypot_risk", 30))
+        semantic_risk = self._safe_float(token_data.get("semantic_risk", 15))
+        semantic_flags = list(token_data.get("semantic_risk_flags", []) or [])
 
         metadata_retrieved = bool(token_data.get("metadata_retrieved", False))
         metadata_present = bool(token_data.get("metadata_json") or token_data.get("uri_metadata"))
@@ -94,6 +111,23 @@ class ScoreEngine:
         # Main residual-risk penalty: usar aggregate como castigo principal
         score -= aggregate_risk * 0.38
 
+        # Semantic penalty: castigo directo para borderline semánticos que lograron pasar filtros
+        if semantic_risk >= 85:
+            score -= 14
+            notes.append("Critical semantic contamination")
+        elif semantic_risk >= 70:
+            score -= 9
+            notes.append("High semantic contamination")
+        elif semantic_risk >= 55:
+            score -= 5
+            notes.append("Weak token-brand semantics")
+        elif semantic_risk >= 40:
+            score -= 2
+
+        score -= self._semantic_flag_penalty(semantic_flags)
+        if semantic_flags:
+            notes.append(f"Semantic flags: {', '.join(semantic_flags[:4])}")
+
         # Secondary fine-tuning only for extreme risks
         if authority_risk >= 80:
             score -= 6
@@ -127,7 +161,7 @@ class ScoreEngine:
 
         final_score = round(max(0.0, min(100.0, score)), 2)
 
-        # Confidence: mezcla de score, limpieza y completitud de datos
+        # Confidence: mezcla de score, limpieza, semántica y completitud de datos
         data_completeness = 0.0
         if metadata_retrieved or metadata_present:
             data_completeness += 0.2
@@ -137,11 +171,21 @@ class ScoreEngine:
             data_completeness += 0.1
 
         cleanliness = max(0.0, 100.0 - aggregate_risk)
+        semantic_cleanliness = max(0.0, 100.0 - semantic_risk)
         confidence = (
-            (final_score / 100.0) * 0.5
-            + (cleanliness / 100.0) * 0.3
-            + data_completeness * 0.2
+            (final_score / 100.0) * 0.45
+            + (cleanliness / 100.0) * 0.25
+            + (semantic_cleanliness / 100.0) * 0.15
+            + data_completeness * 0.15
         )
+
+        if semantic_risk >= 85:
+            confidence -= 0.10
+        elif semantic_risk >= 70:
+            confidence -= 0.06
+        elif semantic_risk >= 55:
+            confidence -= 0.03
+
         confidence = round(max(0.0, min(0.99, confidence)), 4)
 
         return {
@@ -157,14 +201,13 @@ class ScoreEngine:
                 "concentration_risk": concentration_risk,
                 "metadata_risk": metadata_risk,
                 "honeypot_risk": honeypot_risk,
+                "semantic_risk": semantic_risk,
+                "semantic_flags": semantic_flags,
                 "metadata_retrieved": metadata_retrieved,
                 "metadata_present": metadata_present,
                 "notes": notes,
             },
         }
-       
-       
-        
 
     async def score_and_emit(self, event: Event) -> bool:
         """Score token and emit ScoreCalculated."""
