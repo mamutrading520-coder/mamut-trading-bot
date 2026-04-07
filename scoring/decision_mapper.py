@@ -65,6 +65,13 @@ class DecisionMapper:
         "all_caps_claim",
         "multiword_name",
     }
+    _STRICT_BRAND_FLAGS: Set[str] = {
+        "asset_mimic_branding",
+        "generic_financial_branding",
+        "community_followership_branding",
+        "generic_archetype_branding",
+        "low_brand_specificity",
+    }
 
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -102,6 +109,18 @@ class DecisionMapper:
         if flags is None:
             flags = payload.get("semantic_risk_flags", []) or []
         return {str(flag) for flag in flags if flag}
+
+    def _get_brand_flags(self, payload: Dict[str, Any]) -> Set[str]:
+        breakdown = self._get_breakdown(payload)
+        flags = breakdown.get("brand_flags", []) or []
+        return {str(flag) for flag in flags if flag}
+
+    def _get_brand_distinctiveness(self, payload: Dict[str, Any]) -> float:
+        breakdown = self._get_breakdown(payload)
+        return self._safe_float(
+            breakdown.get("brand_distinctiveness_score", payload.get("brand_distinctiveness_score", 100)),
+            100.0,
+        )
 
     def _make_reasoning(self, score_analysis: Dict[str, Any], decision: str) -> str:
         final_score = self._safe_float(score_analysis.get("final_score", 0))
@@ -147,23 +166,35 @@ class DecisionMapper:
         metadata_score = self._safe_float(
             breakdown.get("metadata_score", payload.get("metadata_score", 0)),
         )
+        brand_distinctiveness = self._get_brand_distinctiveness(payload)
         semantic_gate_applied = self._safe_bool(
             breakdown.get("semantic_early_gate_applied", False)
         )
+        brand_gate_applied = self._safe_bool(
+            breakdown.get("brand_early_gate_applied", False)
+        )
         semantic_flags = self._get_semantic_flags(payload)
+        brand_flags = self._get_brand_flags(payload)
 
-        strict_high_threshold = max(float(self.settings.score_threshold_high_potential), 63.0)
-        strict_min_confidence = max(float(self.settings.signal_early_min_confidence), 0.67)
-        strict_max_aggregate_risk = min(float(self.settings.signal_early_max_aggregate_risk), 30.0)
+        strict_high_threshold = max(float(self.settings.score_threshold_high_potential), 66.5)
+        strict_min_confidence = max(float(self.settings.signal_early_min_confidence), 0.69)
+        strict_max_aggregate_risk = min(float(self.settings.signal_early_max_aggregate_risk), 28.0)
+        strict_min_brand_distinctiveness = 58.0
 
         if final_score < strict_high_threshold:
-            adjustments.append(f"signal_early_score_floor<{strict_high_threshold:.0f}")
+            adjustments.append(f"signal_early_score_floor<{strict_high_threshold:.1f}")
         if confidence < strict_min_confidence:
             adjustments.append(f"signal_early_confidence_floor<{strict_min_confidence:.2f}")
         if aggregate_risk > strict_max_aggregate_risk:
             adjustments.append(f"signal_early_risk_cap>{strict_max_aggregate_risk:.0f}")
+        if metadata_score < 72.0:
+            adjustments.append(f"metadata_score={metadata_score:.0f}")
+        if brand_distinctiveness < strict_min_brand_distinctiveness:
+            adjustments.append(f"brand_distinctiveness={brand_distinctiveness:.0f}")
         if semantic_gate_applied:
             adjustments.append("semantic_early_gate_applied")
+        if brand_gate_applied:
+            adjustments.append("brand_early_gate_applied")
         if semantic_risk >= 15.0:
             adjustments.append(f"semantic_risk={semantic_risk:.1f}")
         if semantic_flags & self._STRICT_SIGNAL_EARLY_FLAGS:
@@ -174,8 +205,10 @@ class DecisionMapper:
             adjustments.append(
                 "review_semantic_flags=" + ",".join(sorted(semantic_flags & self._REVIEW_SIGNAL_EARLY_FLAGS))
             )
-        if metadata_score < 65.0:
-            adjustments.append(f"metadata_score={metadata_score:.0f}")
+        if brand_flags & self._STRICT_BRAND_FLAGS:
+            adjustments.append(
+                "strict_brand_flags=" + ",".join(sorted(brand_flags & self._STRICT_BRAND_FLAGS))
+            )
         if wallet_cluster_risk >= 45.0:
             adjustments.append(f"wallet_cluster_risk={wallet_cluster_risk:.0f}")
         if creator_risk >= 50.0:
@@ -226,14 +259,14 @@ class DecisionMapper:
             if decision_adjustments:
                 decision = "MONITOR"
                 logger.debug(
-                    f"Downgraded {symbol} SIGNAL_EARLY → MONITOR: {'; '.join(decision_adjustments)}"
+                    f"Downgraded {symbol} SIGNAL_EARLY -> MONITOR: {'; '.join(decision_adjustments)}"
                 )
 
         if score_analysis.get("creator_resolved") is False and decision == "SIGNAL_EARLY":
             decision = "MONITOR"
             decision_adjustments.append("creator_resolved=False")
             logger.debug(
-                f"Downgraded {symbol} SIGNAL_EARLY → MONITOR: creator_resolved=False"
+                f"Downgraded {symbol} SIGNAL_EARLY -> MONITOR: creator_resolved=False"
             )
 
         meta = DECISION_METADATA[decision]
@@ -253,9 +286,10 @@ class DecisionMapper:
                 "signal_early_min_score": high_threshold,
                 "signal_early_min_confidence": signal_early_min_confidence,
                 "signal_early_max_aggregate_risk": signal_early_max_aggregate_risk,
-                "signal_early_strict_min_score": max(high_threshold, 63.0),
-                "signal_early_strict_min_confidence": max(signal_early_min_confidence, 0.67),
-                "signal_early_strict_max_aggregate_risk": min(signal_early_max_aggregate_risk, 30.0),
+                "signal_early_strict_min_score": max(high_threshold, 66.5),
+                "signal_early_strict_min_confidence": max(signal_early_min_confidence, 0.69),
+                "signal_early_strict_max_aggregate_risk": min(signal_early_max_aggregate_risk, 28.0),
+                "signal_early_strict_min_brand_distinctiveness": 58.0,
                 "monitor_min_score": medium_threshold,
                 "monitor_min_confidence": monitor_min_confidence,
                 "monitor_max_aggregate_risk": monitor_max_aggregate_risk,
@@ -313,9 +347,12 @@ class DecisionMapper:
             )
 
             await self.event_bus.emit(decision_event)
+            adjustments = decision.get("decision_adjustments", []) or []
+            suffix = f" | adjustments={';'.join(adjustments)}" if adjustments else ""
             logger.info(
                 f"DecisionMade emitted: {decision['decision']} "
                 f"(score={decision['final_score']:.2f}, conf={decision['confidence']:.2f}, risk={decision['aggregate_risk_score']:.2f})"
+                f"{suffix}"
             )
             return decision["decision"]
 
