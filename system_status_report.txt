@@ -1,0 +1,257 @@
+================================================================================
+MAMUT TRADING BOT — SYSTEM STATUS REPORT
+================================================================================
+Date        : 2026-03-27
+Version     : 1.0
+Status      : OPERATIONAL
+Blockchain  : Solana
+Data source : Pump.fun WebSocket (pumpportal.fun/api/data)
+Database    : SQLite (mamut.db)
+================================================================================
+
+
+────────────────────────────────────────────────────────────────────────────────
+1. PIPELINE STATUS
+────────────────────────────────────────────────────────────────────────────────
+
+Stage │ Module                              │ Status
+──────┼─────────────────────────────────────┼───────────────────────────────────
+  1   │ DISCOVERY   pump_listener.py         │ ✅ OPERATIONAL
+  2   │ ENRICHMENT  token_enricher.py        │ ✅ OPERATIONAL
+  3   │ FILTERING   trash_filter_engine.py   │ ✅ OPERATIONAL
+  4   │ SCORING     score_engine.py          │ ✅ OPERATIONAL
+  5   │ DECISION    decision_mapper.py       │ ✅ OPERATIONAL
+  6   │ SIGNALS     signal_engine.py         │ ✅ OPERATIONAL
+  7   │ ALERTS      alert_dispatcher.py      │ ✅ OPERATIONAL
+
+Secondary pipeline:
+  •  Raydium pool monitor  (validation/raydium_listener.py)       ✅ OPERATIONAL
+  •  Market confirmation   (validation/market_confirmation_engine.py) ✅ OPERATIONAL
+  •  Migration tracker     (analysis/migration_tracker.py)        ✅ OPERATIONAL
+
+Advanced analysis modules (in development):
+  •  FlowAnalyzer          (analysis/flow_analyzer.py)            ⏳ IN DEVELOPMENT
+  •  BuyerQualityAnalyzer  (analysis/buyer_quality_analyzer.py)   ⏳ IN DEVELOPMENT
+  •  VelocityAnalyzer      (analysis/velocity_analyzer.py)        ⏳ IN DEVELOPMENT
+  •  MomentumEngine        (analysis/momentum_engine.py)          ⏳ IN DEVELOPMENT
+
+
+────────────────────────────────────────────────────────────────────────────────
+2. EVENT FLOW
+────────────────────────────────────────────────────────────────────────────────
+
+  Pump.fun WebSocket
+        │
+        ▼ TokenDiscovered
+  TokenEnricher  (Solana RPC + URI metadata)
+        │
+        ▼ TokenEnriched
+  TrashFilterEngine  (5-layer risk check)
+        ├── Authority Risk
+        ├── Creator Risk
+        ├── Concentration Risk
+        ├── Metadata Risk
+        └── Honeypot Detection
+        │
+        ▼ TokenPassed / TokenRejected
+  ScoreEngine  (0–100 composite score)
+        │
+        ▼ ScoreCalculated
+  DecisionMapper
+        │
+        ▼ DecisionMade  (SIGNAL_EARLY | MONITOR | WARN | REJECT)
+  SignalEngine  (only for SIGNAL_EARLY)
+        │
+        ▼ SignalGenerated
+  AlertDispatcher
+        ├── Webhook (Discord / Telegram)
+        └── SQLite DB
+        │
+        ▼ AlertDispatched ✅
+
+
+────────────────────────────────────────────────────────────────────────────────
+3. FILTER THRESHOLDS
+────────────────────────────────────────────────────────────────────────────────
+
+  Aggregate risk pass threshold   : ≤ 75
+  Authority risk — freeze active  : +45 pts
+  Authority risk — mint active    : +35 pts
+  Creator risk — blacklisted      : 95 (auto-reject)
+  Concentration — creator > 90%   : 95 (critical)
+
+  Decision thresholds:
+    SIGNAL_EARLY  : score ≥ 70  AND  confidence ≥ 0.65  AND  agg_risk ≤ 45
+    MONITOR       : score ≥ 50  AND  confidence ≥ 0.45  AND  agg_risk ≤ 65
+    WARN          : score ≥ 30
+    REJECT        : score < 30
+
+
+────────────────────────────────────────────────────────────────────────────────
+4. DATABASE SCHEMA  (storage/models.py)
+────────────────────────────────────────────────────────────────────────────────
+
+Table                │ Purpose                                    │ Status
+─────────────────────┼────────────────────────────────────────────┼──────────
+tokens               │ Core token records + lifecycle status       │ ✅ ACTIVE
+token_scores         │ Per-token scoring breakdown history         │ ✅ ACTIVE
+signals              │ Generated trading signals                   │ ✅ ACTIVE
+signal_history       │ Signal state transitions (old→new)          │ ✅ ACTIVE
+token_lifecycle      │ Token status change event log               │ ✅ ACTIVE
+performance_metrics  │ Per-operation duration and success flag     │ ✅ ACTIVE
+creator_profiles     │ Creator reputation and success rate         │ ✅ ACTIVE
+audit_logs           │ System-wide audit trail                     │ ✅ ACTIVE
+system_state         │ Key-value store for persistent state        │ ✅ ACTIVE
+
+Key indexes:
+  idx_token_status_created   — lifecycle queries
+  idx_mint_creator_risk      — risk analysis queries
+  idx_signal_id_timestamp    — history reconstruction
+
+
+────────────────────────────────────────────────────────────────────────────────
+5. STORAGE LAYER CAPABILITIES  (storage/sqlite_store.py)
+────────────────────────────────────────────────────────────────────────────────
+
+Token operations:
+  create_token / get_token / token_exists / update_token
+  upsert_token_base
+  update_token_enrichment
+  update_token_filter_result
+  update_token_scoring
+  update_token_raydium_status
+  get_recent_tokens(limit)
+  get_tokens_created_since(minutes)
+
+Score operations:
+  create_score / get_latest_score / record_score_analysis
+
+Signal operations:
+  create_signal / update_signal / get_signal / get_signals_by_mint
+  create_structured_signal
+  get_recent_signals(limit)
+  get_signal_count_since(minutes)
+
+Signal history:
+  create_signal_history(signal_id, mint, old_state, new_state, reason)
+  get_signal_history(mint, signal_id)
+  get_signal_state_timeline(mint)
+
+Token lifecycle:
+  update_token_lifecycle(mint, status, event, reason)
+  get_token_lifecycle(mint)
+
+Performance:
+  create_performance_metric(operation, duration_ms, success, ...)
+
+Creator profiles:
+  create_creator_profile / get_creator_profile / update_creator_profile
+
+Audit & state:
+  log_audit(action, mint, details)
+  set_system_state(key, value) / get_system_state(key)
+
+
+────────────────────────────────────────────────────────────────────────────────
+6. CORE INFRASTRUCTURE  (core/)
+────────────────────────────────────────────────────────────────────────────────
+
+Component          │ Module                    │ Configuration
+───────────────────┼───────────────────────────┼────────────────────────────────
+Orchestrator       │ core/orchestrator.py      │ Coordinates all pipeline stages
+Event Bus          │ core/event_bus.py         │ Async FIFO queue
+Token Lock Manager │ core/token_lock_manager.py│ max 100 concurrent locks, 300s timeout
+Signal Deduper     │ core/signal_deduper.py    │ 60s window, ≤5-pt score diff
+State Manager      │ core/state_manager.py     │ In-memory token state tracking
+
+
+────────────────────────────────────────────────────────────────────────────────
+7. OBSERVABILITY
+────────────────────────────────────────────────────────────────────────────────
+
+Logging:
+  Framework   : Loguru (structured)
+  Console     : INFO level (colored)
+  File        : logs/mamut.log (DEBUG, 500 MB rotation, 7-day retention)
+  Error file  : logs/mamut_error.log (ERROR, 30-day retention)
+
+Utility scripts:
+  monitor.py        — live dashboard (token/signal counts, auto-refresh 10s)
+  watch_logs.py     — real-time log tail (EARLY SIGNAL, ALERT SENT, POOL FOUND)
+  check_db.py       — database table inspector (record counts per table)
+  check_signals.py  — last N signals inspection
+
+Statistics (collected at shutdown via get_stats()):
+  - Total tokens discovered / enriched / filtered / scored / signaled
+  - Lock manager: active/total lock counts
+  - Signal deduper: unique vs. deduplicated counts
+  - Event bus: events processed/queued
+
+
+────────────────────────────────────────────────────────────────────────────────
+8. CONFIGURATION  (.env / config/settings.py)
+────────────────────────────────────────────────────────────────────────────────
+
+Variable                        │ Default                              │ Description
+────────────────────────────────┼──────────────────────────────────────┼─────────────────────────
+PUMP_WS_URL                     │ wss://pumpportal.fun/api/data        │ Pump.fun WebSocket
+SOLANA_RPC_URL                  │ https://api.mainnet-beta.solana.com  │ Solana RPC endpoint
+WEBHOOK_URL                     │ (unset)                              │ Discord/Telegram webhook
+ALERT_ENABLED                   │ true                                 │ Enable/disable alerts
+SCORE_THRESHOLD_HIGH_POTENTIAL  │ 70.0                                 │ SIGNAL_EARLY threshold
+SCORE_THRESHOLD_MEDIUM_POTENTIAL│ 50.0                                 │ MONITOR threshold
+SCORE_THRESHOLD_LOW_POTENTIAL   │ 30.0                                 │ WARN threshold
+DATABASE_URL                    │ sqlite:///./mamut.db                 │ SQLite database path
+DATABASE_POOL_SIZE              │ 10                                   │ Connection pool size
+LOG_LEVEL                       │ INFO                                 │ Logging verbosity
+
+
+────────────────────────────────────────────────────────────────────────────────
+9. DEPENDENCIES  (requirements.txt)
+────────────────────────────────────────────────────────────────────────────────
+
+Core:
+  aiohttp>=3.13.3         (HTTP client — CVE-patched)
+  websockets>=13.0        (WebSocket connections)
+  sqlalchemy>=2.0         (ORM / database layer)
+  pydantic-settings>=2.0  (Configuration management)
+  loguru>=0.7             (Structured logging)
+  httpx>=0.27             (Async HTTP)
+
+Utilities:
+  python-dotenv           (Environment variable loading)
+
+
+────────────────────────────────────────────────────────────────────────────────
+10. RECENT IMPROVEMENTS
+────────────────────────────────────────────────────────────────────────────────
+
+  PR #10  Clear cache & update dependencies; websockets compatibility fix
+  PR #8   Add SUMMARY.md — comprehensive technical documentation
+  PR #7   Remove SignalOutcome dead code and stale test infrastructure
+  PR #6   Fix UTF-8 BOM in 35 files; fix union type annotation; remove .bak file
+  PR #5   Performance: eliminate redundant HTTP calls, O(N) pool scans,
+          repeated string operations
+  PR #4   CVE fix: bump aiohttp 3.11.18 → 3.13.3 (zip-bomb vulnerability)
+  PR #1   Database enhancement: SignalHistory, TokenLifecycle,
+          PerformanceMetrics tables; extended Token/Signal models;
+          advanced query methods; composite indexes
+
+
+────────────────────────────────────────────────────────────────────────────────
+11. KNOWN LIMITATIONS / NEXT STEPS
+────────────────────────────────────────────────────────────────────────────────
+
+  [ ] Activate Discord/Telegram webhooks (WEBHOOK_URL not set by default)
+  [ ] Complete FlowAnalyzer — DexScreener/Solscan volume & momentum
+  [ ] Complete BuyerQualityAnalyzer — bot-pattern detection in early buyers
+  [ ] Integrate Raydium validation actively into main pipeline decision
+  [ ] Implement ML-based signal scoring
+  [ ] Add real-time dashboard (web UI)
+  [ ] Add data retention / cleanup jobs (cleanup_old_records, archive_old_data)
+  [ ] Persist per-run statistics to system_state table on shutdown
+
+
+================================================================================
+END OF REPORT
+================================================================================
